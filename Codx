@@ -13030,11 +13030,11 @@ class MarketClient:
         print(f"   {'-'*70}")
         
         # Get latest snapshot
-        if not self.snapshot_history:
+        if not self.advanced_orderflow or not self.advanced_orderflow.snapshot_history:
             print(f"   ⚪ No data available yet")
             return
         
-        _, latest_snapshot = self.snapshot_history[-1]
+        _, latest_snapshot = self.advanced_orderflow.snapshot_history[-1]
         
         # Category 1: Advanced Order Book Analytics
         print(f"\n   📈 CATEGORY 1: ADVANCED ORDER BOOK ANALYTICS")
