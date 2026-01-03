@@ -9593,6 +9593,24 @@ class MarketClient:
         self.previous_close = None
         self.gap_data = {}  # Store gap information
         self.gap_history = deque(maxlen=50)  # Track gap fills
+        
+        # ─── Phase 2 Deep Features ────────────────────────────
+        # Feature 5: Trade Fragmentation Analysis
+        self.trade_fragments_history = deque(maxlen=100)  # Track trade fragmentation patterns
+        self.recent_trades_for_fragmentation = deque(maxlen=50)  # Recent trades for analysis
+        self.fragmentation_stats = {}  # Current fragmentation statistics
+        
+        # Feature 6: Cumulative Depth at Distance
+        self.cumulative_depth_at_distance = {}  # Depth at various price distances
+        self.execution_capacity_history = deque(maxlen=100)  # Track execution capacity over time
+        
+        # Feature 7: Trade Density per Bar
+        self.trade_density_history = deque(maxlen=100)  # Trade density metrics per bar
+        self.current_bar_trades = []  # Trades in current bar for density calculation
+        
+        # Feature 8: Correlation Matrix (cross-symbol)
+        self.correlation_matrix_history = deque(maxlen=50)  # Correlation snapshots
+        self.price_returns_buffer = {}  # Buffer for calculating returns across symbols
 
     def _fetch_full_depth_snapshot(self):
         """
@@ -9684,8 +9702,345 @@ class MarketClient:
             # Store in history
             self.depth_zones_history.append((timestamp, zones))
             
+            # PHASE 2 FEATURE 6: Cumulative Depth at Distance
+            # Calculate cumulative depth at various price distances from mid
+            self._calculate_cumulative_depth_at_distance(bids, asks, timestamp)
+            
         except Exception as e:
             print(f"[{self.name}] ⚠️  Error calculating depth zones: {e}")
+    
+    def _calculate_cumulative_depth_at_distance(self, bids, asks, timestamp):
+        """
+        Calculate cumulative depth at various price distances from mid price.
+        This helps estimate execution capacity for large orders.
+        
+        Calculates depth at:
+        - 0.1%, 0.25%, 0.5%, 1%, 2%, 5% distance from mid price
+        """
+        try:
+            if not bids or not asks:
+                return
+            
+            # Calculate mid price
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
+            mid_price = (best_bid + best_ask) / 2
+            
+            # Define distance thresholds (in percentage)
+            distance_thresholds = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+            
+            depth_at_distance = {}
+            
+            for distance_pct in distance_thresholds:
+                # Calculate price thresholds
+                bid_threshold = mid_price * (1 - distance_pct / 100)
+                ask_threshold = mid_price * (1 + distance_pct / 100)
+                
+                # Cumulative bid depth within distance
+                cumulative_bid = sum(q for p, q in bids if p >= bid_threshold)
+                
+                # Cumulative ask depth within distance
+                cumulative_ask = sum(q for p, q in asks if p <= ask_threshold)
+                
+                depth_at_distance[f'{distance_pct}%'] = {
+                    'bid_depth': cumulative_bid,
+                    'ask_depth': cumulative_ask,
+                    'total_depth': cumulative_bid + cumulative_ask,
+                    'bid_threshold': bid_threshold,
+                    'ask_threshold': ask_threshold
+                }
+            
+            # Calculate execution capacity (depth required to move price X%)
+            # For institutional orders, this is critical
+            execution_capacity = {}
+            for distance_pct in distance_thresholds:
+                total = depth_at_distance[f'{distance_pct}%']['total_depth']
+                notional = total * mid_price  # Convert to USD
+                execution_capacity[f'{distance_pct}%'] = {
+                    'total_contracts': total,
+                    'notional_usd': notional,
+                    'bid_contracts': depth_at_distance[f'{distance_pct}%']['bid_depth'],
+                    'ask_contracts': depth_at_distance[f'{distance_pct}%']['ask_depth']
+                }
+            
+            # Store results
+            self.cumulative_depth_at_distance = {
+                'timestamp': timestamp,
+                'mid_price': mid_price,
+                'depth_at_distance': depth_at_distance,
+                'execution_capacity': execution_capacity
+            }
+            
+            # Store in history
+            self.execution_capacity_history.append((timestamp, execution_capacity))
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error calculating cumulative depth at distance: {e}")
+    
+    def _analyze_trade_fragmentation(self, timestamp):
+        """
+        Analyze trade fragmentation patterns to detect algorithmic vs manual trading.
+        
+        Fragmentation indicators:
+        - High fragmentation: Many small trades (algorithmic, iceberg orders)
+        - Low fragmentation: Fewer large trades (manual, institutional)
+        """
+        try:
+            if len(self.recent_trades_for_fragmentation) < 10:
+                return
+            
+            recent_trades = list(self.recent_trades_for_fragmentation)[-20:]
+            
+            # Calculate fragmentation metrics
+            total_quantity = sum(t['quantity'] for t in recent_trades)
+            total_component_trades = sum(t['num_trades'] for t in recent_trades)
+            avg_component_trades = total_component_trades / len(recent_trades)
+            
+            # Fragmentation ratio: component trades per aggregate trade
+            # High ratio = high fragmentation (algo trading)
+            fragmentation_ratio = avg_component_trades
+            
+            # Calculate size distribution
+            quantities = [t['quantity'] for t in recent_trades]
+            avg_quantity = safe_mean(quantities)
+            std_quantity = safe_std(quantities)
+            
+            # Coefficient of variation (std/mean) - measures consistency
+            cv = (std_quantity / avg_quantity) if avg_quantity > 0 else 0
+            
+            # Time between trades (microsecond precision)
+            time_diffs = []
+            for i in range(1, len(recent_trades)):
+                time_diff = recent_trades[i]['timestamp'] - recent_trades[i-1]['timestamp']
+                time_diffs.append(time_diff * 1000)  # Convert to ms
+            
+            avg_time_between = safe_mean(time_diffs) if time_diffs else 0
+            
+            # Latency analysis (event_time - trade_time)
+            latencies = [t['latency'] for t in recent_trades if t['latency'] > 0]
+            avg_latency = safe_mean(latencies) if latencies else 0
+            
+            # Classify trading pattern
+            if fragmentation_ratio > 5 and cv < 0.5:
+                pattern = "ALGO_ICEBERG"  # Many small consistent trades
+                confidence = "HIGH"
+            elif fragmentation_ratio > 3 and avg_time_between < 100:
+                pattern = "ALGO_AGGRESSIVE"  # Fast frequent trades
+                confidence = "MEDIUM"
+            elif fragmentation_ratio < 2 and cv > 1.0:
+                pattern = "MANUAL_MIXED"  # Inconsistent trade sizes
+                confidence = "MEDIUM"
+            elif fragmentation_ratio < 1.5:
+                pattern = "INSTITUTIONAL"  # Large single trades
+                confidence = "HIGH"
+            else:
+                pattern = "MIXED"
+                confidence = "LOW"
+            
+            # Store fragmentation stats
+            self.fragmentation_stats = {
+                'timestamp': timestamp,
+                'fragmentation_ratio': fragmentation_ratio,
+                'avg_quantity': avg_quantity,
+                'std_quantity': std_quantity,
+                'coefficient_variation': cv,
+                'avg_time_between_ms': avg_time_between,
+                'avg_latency_ms': avg_latency,
+                'pattern': pattern,
+                'confidence': confidence,
+                'sample_size': len(recent_trades)
+            }
+            
+            # Store in history
+            self.trade_fragments_history.append((timestamp, self.fragmentation_stats.copy()))
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error analyzing trade fragmentation: {e}")
+    
+    def _calculate_trade_density(self, kline_data, close_time):
+        """
+        Calculate trade density per bar - measures bar quality and activity.
+        
+        High density = many trades = high liquidity, institutional interest
+        Low density = few trades = low liquidity, retail dominance
+        """
+        try:
+            # Get bar statistics from kline
+            trade_count = int(kline_data.get("n", 0))  # Number of trades in bar
+            bar_duration_ms = int(kline_data.get("T", 0)) - int(kline_data.get("t", 0))  # Bar duration
+            bar_duration_min = bar_duration_ms / (1000 * 60) if bar_duration_ms > 0 else 15  # Default 15min
+            
+            volume = float(kline_data.get("v", 0))  # Base volume
+            quote_volume = float(kline_data.get("q", 0))  # Quote volume
+            
+            # Calculate density metrics
+            trades_per_minute = trade_count / bar_duration_min if bar_duration_min > 0 else 0
+            volume_per_trade = volume / trade_count if trade_count > 0 else 0
+            quote_volume_per_trade = quote_volume / trade_count if trade_count > 0 else 0
+            
+            # Price movement metrics
+            open_price = float(kline_data.get("o", 0))
+            close_price = float(kline_data.get("c", 0))
+            high_price = float(kline_data.get("h", 0))
+            low_price = float(kline_data.get("l", 0))
+            
+            price_range = high_price - low_price
+            price_change = abs(close_price - open_price)
+            
+            # Efficiency ratio: price change / price range
+            # High ratio = efficient move (trending)
+            # Low ratio = inefficient move (choppy)
+            efficiency_ratio = (price_change / price_range) if price_range > 0 else 0
+            
+            # Calculate trades per price level (micro-structure density)
+            price_levels_touched = price_range / TICK_SIZE if price_range > 0 else 1
+            trades_per_level = trade_count / price_levels_touched if price_levels_touched > 0 else 0
+            
+            # Classify bar quality
+            if trades_per_minute > 50 and efficiency_ratio > 0.6:
+                quality = "EXCELLENT"  # High activity, trending
+            elif trades_per_minute > 30 and efficiency_ratio > 0.4:
+                quality = "GOOD"  # Decent activity, some direction
+            elif trades_per_minute > 15:
+                quality = "AVERAGE"  # Normal activity
+            elif trades_per_minute > 5:
+                quality = "POOR"  # Low activity
+            else:
+                quality = "VERY_POOR"  # Very low activity
+            
+            # Store density metrics
+            density_metrics = {
+                'timestamp': close_time.timestamp(),
+                'trade_count': trade_count,
+                'trades_per_minute': trades_per_minute,
+                'volume_per_trade': volume_per_trade,
+                'quote_volume_per_trade': quote_volume_per_trade,
+                'price_range': price_range,
+                'price_change': price_change,
+                'efficiency_ratio': efficiency_ratio,
+                'trades_per_level': trades_per_level,
+                'quality': quality,
+                'bar_duration_min': bar_duration_min
+            }
+            
+            # Store in history
+            self.trade_density_history.append((close_time.timestamp(), density_metrics))
+            
+            # Clear current bar trades for next bar
+            self.current_bar_trades = []
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error calculating trade density: {e}")
+    
+    def _calculate_correlation_matrix(self, timestamp):
+        """
+        Calculate correlation matrix across multiple trading pairs.
+        Useful for pairs trading, risk management, and market regime detection.
+        """
+        try:
+            if len(self.all_tickers_history) < 2:
+                return
+            
+            # Get recent ticker snapshots (last 30 snapshots for correlation)
+            recent_snapshots = list(self.all_tickers_history)[-30:]
+            
+            # Extract symbols that appear in all snapshots
+            common_symbols = set(recent_snapshots[0]['snapshot'].keys())
+            for snapshot in recent_snapshots[1:]:
+                common_symbols &= set(snapshot['snapshot'].keys())
+            
+            # Need at least 3 symbols and 10 datapoints for meaningful correlation
+            if len(common_symbols) < 3 or len(recent_snapshots) < 10:
+                return
+            
+            # Calculate returns for each symbol
+            returns_by_symbol = {}
+            for symbol in common_symbols:
+                prices = []
+                for snapshot in recent_snapshots:
+                    price = snapshot['snapshot'].get(symbol, {}).get('last_price', 0)
+                    if price > 0:
+                        prices.append(price)
+                
+                # Calculate returns
+                if len(prices) >= 2:
+                    returns = []
+                    for i in range(1, len(prices)):
+                        ret = (prices[i] - prices[i-1]) / prices[i-1] if prices[i-1] > 0 else 0
+                        returns.append(ret)
+                    returns_by_symbol[symbol] = returns
+            
+            # Calculate correlation matrix (only for our main symbol vs others)
+            correlations = {}
+            our_symbol = self.name  # e.g., "BTCUSDT"
+            
+            if our_symbol in returns_by_symbol:
+                our_returns = returns_by_symbol[our_symbol]
+                
+                for other_symbol, other_returns in returns_by_symbol.items():
+                    if other_symbol == our_symbol:
+                        continue
+                    
+                    # Ensure same length
+                    min_len = min(len(our_returns), len(other_returns))
+                    if min_len < 5:  # Need at least 5 datapoints
+                        continue
+                    
+                    our_ret_trimmed = our_returns[:min_len]
+                    other_ret_trimmed = other_returns[:min_len]
+                    
+                    # Calculate correlation coefficient
+                    corr = self._calculate_correlation(our_ret_trimmed, other_ret_trimmed)
+                    
+                    if corr is not None:
+                        correlations[other_symbol] = corr
+            
+            # Store correlation matrix
+            if correlations:
+                # Find top correlations (positive and negative)
+                sorted_corr = sorted(correlations.items(), key=lambda x: abs(x[1]), reverse=True)
+                top_positive = [(s, c) for s, c in sorted_corr if c > 0][:5]
+                top_negative = [(s, c) for s, c in sorted_corr if c < 0][:5]
+                
+                self.correlation_matrix = {
+                    'timestamp': timestamp,
+                    'base_symbol': our_symbol,
+                    'correlations': correlations,
+                    'top_positive': top_positive,
+                    'top_negative': top_negative,
+                    'sample_size': len(returns_by_symbol[our_symbol]) if our_symbol in returns_by_symbol else 0
+                }
+                
+                # Store in history
+                self.correlation_matrix_history.append((timestamp, self.correlation_matrix.copy()))
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error calculating correlation matrix: {e}")
+    
+    def _calculate_correlation(self, x, y):
+        """Calculate Pearson correlation coefficient between two series."""
+        try:
+            if len(x) != len(y) or len(x) < 2:
+                return None
+            
+            n = len(x)
+            mean_x = sum(x) / n
+            mean_y = sum(y) / n
+            
+            numerator = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
+            
+            sum_sq_x = sum((x[i] - mean_x) ** 2 for i in range(n))
+            sum_sq_y = sum((y[i] - mean_y) ** 2 for i in range(n))
+            
+            denominator = (sum_sq_x * sum_sq_y) ** 0.5
+            
+            if denominator == 0:
+                return None
+            
+            return numerator / denominator
+            
+        except Exception:
+            return None
     
     async def _load_historical_data(self, symbol):
         """
@@ -9953,6 +10308,43 @@ class MarketClient:
                 if self.advanced_orderflow.depth_snapshots:
                     last_depth_ts = self.advanced_orderflow.depth_snapshots[-1][0]
                     self.advanced_orderflow.correlate_depth_trade(last_depth_ts, ts_t)
+            
+            # PHASE 2 FEATURE 5: Trade Fragmentation Analysis
+            # Extract additional fields from aggTrade for fragmentation detection
+            first_trade_id = int(d.get("f", 0))  # First trade ID in aggregate
+            last_trade_id = int(d.get("l", 0))   # Last trade ID in aggregate
+            trade_time = int(d.get("T", 0))      # Trade time
+            event_time = int(d.get("E", 0))      # Event time
+            
+            # Calculate number of individual trades in this aggregate
+            num_trades = last_trade_id - first_trade_id + 1 if last_trade_id >= first_trade_id else 1
+            
+            # Store trade for fragmentation analysis
+            trade_info = {
+                'timestamp': ts_t,
+                'price': p,
+                'quantity': q,
+                'side': side,
+                'num_trades': num_trades,
+                'trade_time': trade_time,
+                'event_time': event_time,
+                'latency': (event_time - trade_time) if event_time > 0 and trade_time > 0 else 0
+            }
+            self.recent_trades_for_fragmentation.append(trade_info)
+            
+            # Analyze fragmentation patterns (every 10 trades)
+            if len(self.recent_trades_for_fragmentation) >= 10:
+                self._analyze_trade_fragmentation(ts_t)
+            
+            # PHASE 2 FEATURE 7: Trade Density per Bar
+            # Track trades in current bar for density calculation
+            self.current_bar_trades.append({
+                'timestamp': ts_t,
+                'price': p,
+                'quantity': q,
+                'side': side,
+                'num_component_trades': num_trades
+            })
 
         # 3) Trade ticks
         elif s.endswith("@trade"):
@@ -10172,6 +10564,11 @@ class MarketClient:
                     "timestamp": ts_now,
                     "snapshot": self.all_tickers_data.copy()
                 })
+                
+                # PHASE 2 FEATURE 8: Correlation Matrix (cross-symbol analysis)
+                # Calculate correlation matrix when we have ticker data
+                if len(self.all_tickers_history) >= 2:
+                    self._calculate_correlation_matrix(ts_now)
         
         # 9) @compositeIndex - Multi-exchange composite index
         elif s.endswith("@compositeIndex"):
@@ -10242,6 +10639,11 @@ class MarketClient:
                     taker_buy_base_vol,
                     taker_sell_base_vol
                 ))
+                
+                # PHASE 2 FEATURE 7: Trade Density per Bar
+                # Calculate trade density metrics when bar closes
+                self._calculate_trade_density(k, close_time)
+                
                 asyncio.create_task(self._compute_and_print(close_time, k))
         
         # Check if it's time for a 30-second snapshot
@@ -10329,6 +10731,9 @@ class MarketClient:
             
             # Print Phase 1 Deep Features
             self._print_phase1_deep_features()
+            
+            # Print Phase 2 Deep Features
+            self._print_phase2_deep_features()
             
             if PRINT_ALL_FEATURES:
                 # Print ALL features from all remaining feature sets
@@ -10650,6 +11055,182 @@ class MarketClient:
                 print(f"      ✅ NO SIGNIFICANT GAP (gap < 0.5%)")
                 print(f"         • Previous Close: ${self.gap_data.get('previous_close', 0):.2f}")
                 print(f"         • Open Price: ${self.gap_data.get('open_price', 0):.2f}")
+        
+        print(f"\n   {'='*70}")
+    
+    def _print_phase2_deep_features(self):
+        """
+        Print Phase 2 Deep Features:
+        5. Trade Fragmentation Analysis (algo vs manual trading)
+        6. Cumulative Depth at Distance (execution capacity)
+        7. Trade Density per Bar (bar quality metrics)
+        8. Correlation Matrix (pairs trading opportunities)
+        """
+        print(f"\n  🔬 PHASE 2 DEEP FEATURES:")
+        print(f"   {'-'*70}")
+        
+        # Feature 5: Trade Fragmentation Analysis
+        if self.fragmentation_stats:
+            print(f"\n   🧩 TRADE FRAGMENTATION ANALYSIS:")
+            stats = self.fragmentation_stats
+            pattern = stats.get('pattern', 'UNKNOWN')
+            confidence = stats.get('confidence', 'UNKNOWN')
+            frag_ratio = stats.get('fragmentation_ratio', 0)
+            
+            # Color-code based on pattern
+            if pattern == "ALGO_ICEBERG":
+                pattern_emoji = "🤖"
+                pattern_desc = "Algorithmic Iceberg Orders"
+            elif pattern == "ALGO_AGGRESSIVE":
+                pattern_emoji = "⚡"
+                pattern_desc = "High-Frequency Algo Trading"
+            elif pattern == "INSTITUTIONAL":
+                pattern_emoji = "🏦"
+                pattern_desc = "Institutional Block Trades"
+            elif pattern == "MANUAL_MIXED":
+                pattern_emoji = "👤"
+                pattern_desc = "Manual/Retail Trading"
+            else:
+                pattern_emoji = "❓"
+                pattern_desc = "Mixed Trading Pattern"
+            
+            print(f"      {pattern_emoji} Pattern: {pattern_desc} ({confidence} confidence)")
+            print(f"      • Fragmentation Ratio: {frag_ratio:.2f} (trades per aggregate)")
+            print(f"      • Avg Trade Size: {stats.get('avg_quantity', 0):.4f}")
+            print(f"      • Size Variability (CV): {stats.get('coefficient_variation', 0):.3f}")
+            print(f"      • Avg Time Between Trades: {stats.get('avg_time_between_ms', 0):.1f}ms")
+            print(f"      • Avg Network Latency: {stats.get('avg_latency_ms', 0):.1f}ms")
+            
+            # Trading implications
+            if pattern == "ALGO_ICEBERG":
+                print(f"      💡 IMPLICATIONS:")
+                print(f"         • Large hidden orders being executed")
+                print(f"         • Monitor for price support/resistance")
+            elif pattern == "ALGO_AGGRESSIVE":
+                print(f"      💡 IMPLICATIONS:")
+                print(f"         • High-frequency activity detected")
+                print(f"         • Potential volatility increase")
+        
+        # Feature 6: Cumulative Depth at Distance
+        if self.cumulative_depth_at_distance:
+            print(f"\n   📏 CUMULATIVE DEPTH AT DISTANCE (Execution Capacity):")
+            exec_cap = self.cumulative_depth_at_distance.get('execution_capacity', {})
+            mid_price = self.cumulative_depth_at_distance.get('mid_price', 0)
+            
+            print(f"      Mid Price: ${mid_price:.2f}")
+            print(f"\n      Distance | Contracts | Notional USD | Bid/Ask Split")
+            print(f"      ---------|-----------|--------------|---------------")
+            
+            for distance in ['0.1%', '0.25%', '0.5%', '1.0%', '2.0%', '5.0%']:
+                if distance in exec_cap:
+                    data = exec_cap[distance]
+                    contracts = data['total_contracts']
+                    notional = data['notional_usd']
+                    bid_pct = (data['bid_contracts'] / contracts * 100) if contracts > 0 else 0
+                    ask_pct = (data['ask_contracts'] / contracts * 100) if contracts > 0 else 0
+                    
+                    print(f"      {distance:8} | {contracts:9.2f} | ${notional:11,.0f} | {bid_pct:.0f}%/{ask_pct:.0f}%")
+            
+            # Highlight key thresholds
+            if '1.0%' in exec_cap:
+                one_pct_notional = exec_cap['1.0%']['notional_usd']
+                if one_pct_notional > 10_000_000:
+                    liquidity_status = "EXCELLENT"
+                    emoji = "🟢"
+                elif one_pct_notional > 5_000_000:
+                    liquidity_status = "GOOD"
+                    emoji = "🟡"
+                elif one_pct_notional > 1_000_000:
+                    liquidity_status = "MODERATE"
+                    emoji = "🟠"
+                else:
+                    liquidity_status = "LOW"
+                    emoji = "🔴"
+                
+                print(f"\n      {emoji} Liquidity Status (1% move): {liquidity_status}")
+                print(f"         • ${one_pct_notional:,.0f} available within 1% of mid")
+        
+        # Feature 7: Trade Density per Bar
+        if self.trade_density_history:
+            print(f"\n   📊 TRADE DENSITY (Latest Bar Quality):")
+            _, density = self.trade_density_history[-1]
+            
+            quality = density.get('quality', 'UNKNOWN')
+            trades_per_min = density.get('trades_per_minute', 0)
+            efficiency = density.get('efficiency_ratio', 0)
+            
+            # Color-code based on quality
+            if quality == "EXCELLENT":
+                quality_emoji = "🟢"
+            elif quality == "GOOD":
+                quality_emoji = "🟡"
+            elif quality == "AVERAGE":
+                quality_emoji = "⚪"
+            elif quality == "POOR":
+                quality_emoji = "🟠"
+            else:
+                quality_emoji = "🔴"
+            
+            print(f"      {quality_emoji} Bar Quality: {quality}")
+            print(f"      • Trade Count: {density.get('trade_count', 0):,}")
+            print(f"      • Trades/Minute: {trades_per_min:.1f}")
+            print(f"      • Avg Volume/Trade: {density.get('volume_per_trade', 0):.4f}")
+            print(f"      • Price Efficiency: {efficiency:.2%}")
+            print(f"      • Trades/Price Level: {density.get('trades_per_level', 0):.2f}")
+            
+            # Bar quality implications
+            if quality in ["EXCELLENT", "GOOD"]:
+                print(f"      💡 High-quality bar - strong conviction moves")
+            elif quality == "POOR" or quality == "VERY_POOR":
+                print(f"      ⚠️  Low-quality bar - low liquidity/conviction")
+        
+        # Feature 8: Correlation Matrix
+        if self.correlation_matrix:
+            print(f"\n   🔗 CORRELATION MATRIX (Cross-Symbol Analysis):")
+            corr_data = self.correlation_matrix
+            base_symbol = corr_data.get('base_symbol', self.name)
+            
+            print(f"      Base Symbol: {base_symbol}")
+            
+            # Top positive correlations
+            top_pos = corr_data.get('top_positive', [])
+            if top_pos:
+                print(f"\n      📈 TOP POSITIVE CORRELATIONS:")
+                for i, (symbol, corr) in enumerate(top_pos[:3], 1):
+                    print(f"         {i}. {symbol}: {corr:+.3f}")
+                
+                # Pairs trading opportunity
+                if top_pos[0][1] > 0.8:
+                    print(f"         💡 Strong positive correlation - consider pair trades")
+            
+            # Top negative correlations
+            top_neg = corr_data.get('top_negative', [])
+            if top_neg:
+                print(f"\n      📉 TOP NEGATIVE CORRELATIONS:")
+                for i, (symbol, corr) in enumerate(top_neg[:3], 1):
+                    print(f"         {i}. {symbol}: {corr:+.3f}")
+                
+                # Hedge opportunity
+                if top_neg[0][1] < -0.5:
+                    print(f"         💡 Strong negative correlation - potential hedge")
+            
+            # Market regime indication
+            total_symbols = len(corr_data.get('correlations', {}))
+            avg_corr = safe_mean(list(corr_data.get('correlations', {}).values()))
+            
+            if avg_corr > 0.5:
+                regime = "HIGH CORRELATION (Risk-On)"
+                emoji = "📈"
+            elif avg_corr < -0.2:
+                regime = "LOW/NEGATIVE CORRELATION (Risk-Off)"
+                emoji = "📉"
+            else:
+                regime = "MIXED CORRELATION (Neutral)"
+                emoji = "⚪"
+            
+            print(f"\n      {emoji} Market Regime: {regime}")
+            print(f"         • Average Correlation: {avg_corr:+.3f}")
+            print(f"         • Symbols Analyzed: {total_symbols}")
         
         print(f"\n   {'='*70}")
 
