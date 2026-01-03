@@ -9574,6 +9574,25 @@ class MarketClient:
         self.composite_index_history = deque(maxlen=300)  # 5-minute history at 1s updates
         self.basis_divergence_history = deque(maxlen=100)  # Track basis vs futures spread
         self.fair_value_deviation_history = deque(maxlen=100)  # Fair value deviation tracking
+        
+        # ─── Phase 1 Deep Features ────────────────────────────
+        # Feature 1: Taker Buy/Sell Pressure (from kline)
+        self.taker_buy_pressure_history = deque(maxlen=100)  # (timestamp, buy_ratio, buy_vol, sell_vol)
+        self.current_bar_taker_data = {}  # Store current bar taker data
+        
+        # Feature 2: Multi-Level Depth Zones
+        self.depth_zones_history = deque(maxlen=100)  # (timestamp, zones_dict)
+        self.depth_concentration_ratio = 0.0
+        
+        # Feature 3: Real-time Funding Rate (from @markPrice)
+        self.realtime_funding_rate = None
+        self.realtime_funding_history = deque(maxlen=300)  # 5-minute history at 1s updates
+        self.funding_momentum = 0.0
+        
+        # Feature 4: Previous Close Gap Analysis
+        self.previous_close = None
+        self.gap_data = {}  # Store gap information
+        self.gap_history = deque(maxlen=50)  # Track gap fills
 
     def _fetch_full_depth_snapshot(self):
         """
@@ -9604,8 +9623,69 @@ class MarketClient:
                 self.advanced_orderflow.store_full_depth(bids, asks, timestamp)
                 print(f"[{self.name}] ✅ Fetched FULL market depth: {len(bids)} bids, {len(asks)} asks (ALL available levels - max 1000)")
                 
+                # PHASE 1 FEATURE 2: Multi-Level Depth Zones
+                # Calculate depth zones from full depth snapshot
+                self._calculate_depth_zones(bids, asks, timestamp)
+                
         except Exception as e:
             print(f"[{self.name}] ⚠️  Failed to fetch full depth: {e}")
+    
+    def _calculate_depth_zones(self, bids, asks, timestamp):
+        """
+        Calculate multi-level depth zones from full order book.
+        
+        Divides order book into zones:
+        - L1_L5: Top 5 levels (already used elsewhere)
+        - L6_L20: Levels 6-20
+        - L21_L50: Levels 21-50
+        - L51_L100: Levels 51-100
+        - L101_L500: Levels 101-500
+        - L501_L1000: Levels 501-1000
+        """
+        try:
+            # Calculate cumulative depth for each zone
+            zones = {
+                'L1_L5_bid': sum(q for _, q in bids[:5]),
+                'L6_L20_bid': sum(q for _, q in bids[5:20]),
+                'L21_L50_bid': sum(q for _, q in bids[20:50]),
+                'L51_L100_bid': sum(q for _, q in bids[50:100]),
+                'L101_L500_bid': sum(q for _, q in bids[100:500]),
+                'L501_L1000_bid': sum(q for _, q in bids[500:1000]),
+                
+                'L1_L5_ask': sum(q for _, q in asks[:5]),
+                'L6_L20_ask': sum(q for _, q in asks[5:20]),
+                'L21_L50_ask': sum(q for _, q in asks[20:50]),
+                'L51_L100_ask': sum(q for _, q in asks[50:100]),
+                'L101_L500_ask': sum(q for _, q in asks[100:500]),
+                'L501_L1000_ask': sum(q for _, q in asks[500:1000]),
+            }
+            
+            # Calculate total depth
+            total_bid_depth = sum(zones[k] for k in zones if 'bid' in k)
+            total_ask_depth = sum(zones[k] for k in zones if 'ask' in k)
+            
+            zones['total_bid_depth'] = total_bid_depth
+            zones['total_ask_depth'] = total_ask_depth
+            
+            # Calculate concentration ratio (top 5 vs total)
+            if total_bid_depth > 0:
+                bid_concentration = zones['L1_L5_bid'] / total_bid_depth
+            else:
+                bid_concentration = 0
+                
+            if total_ask_depth > 0:
+                ask_concentration = zones['L1_L5_ask'] / total_ask_depth
+            else:
+                ask_concentration = 0
+            
+            self.depth_concentration_ratio = (bid_concentration + ask_concentration) / 2
+            zones['concentration_ratio'] = self.depth_concentration_ratio
+            
+            # Store in history
+            self.depth_zones_history.append((timestamp, zones))
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error calculating depth zones: {e}")
     
     async def _load_historical_data(self, symbol):
         """
@@ -9955,6 +10035,35 @@ class MarketClient:
         # 6) markPrice
         elif s.endswith("@markPrice"):
             self.last_mark_price = float(d.get("p", 0))
+            
+            # PHASE 1 FEATURE 3: Real-time Funding Rate from @markPrice
+            # Extract real-time funding rate (much faster than 15min REST polling)
+            realtime_funding = float(d.get("r", 0))  # Funding rate
+            index_price = float(d.get("i", 0))  # Index price from mark price stream
+            estimated_settle_price = float(d.get("P", 0))  # Estimated settle price
+            next_funding_time = int(d.get("T", 0))  # Next funding time (ms)
+            
+            # Update real-time funding rate
+            prev_funding = self.realtime_funding_rate
+            self.realtime_funding_rate = realtime_funding
+            
+            # Calculate funding momentum (rate of change)
+            if prev_funding is not None and prev_funding != 0:
+                self.funding_momentum = realtime_funding - prev_funding
+            
+            # Store in history
+            self.realtime_funding_history.append((
+                ts_now,
+                realtime_funding,
+                self.funding_momentum,
+                next_funding_time
+            ))
+            
+            # Calculate time to next funding (for urgency)
+            if next_funding_time > 0:
+                time_to_funding = (next_funding_time - ts_now * 1000) / 1000  # seconds
+            else:
+                time_to_funding = None
         
         # 7) @ticker - 24h rolling statistics for momentum & sentiment analysis
         elif s.endswith("@ticker") and not s.endswith("@bookTicker") and not s.endswith("@miniTicker"):
@@ -9977,6 +10086,56 @@ class MarketClient:
                 "last_trade_id": int(d.get("L", 0)),            # Last trade ID
                 "trade_count": int(d.get("n", 0))               # Total number of trades
             }
+            
+            # PHASE 1 FEATURE 4: Previous Close Gap Analysis
+            # Extract previous day's close (x field = first trade F-1 price)
+            prev_close = float(d.get("x", 0))  # Previous day's close price
+            open_price = float(d.get("o", 0))  # Current open price
+            current_price = float(d.get("c", 0))  # Current price
+            high_price = float(d.get("h", 0))
+            low_price = float(d.get("l", 0))
+            
+            if prev_close > 0:
+                # Update previous close
+                if self.previous_close is None:
+                    self.previous_close = prev_close
+                
+                # Calculate gap
+                gap = open_price - prev_close
+                gap_pct = (gap / prev_close) * 100 if prev_close > 0 else 0
+                
+                # Classify gap type
+                gap_up = gap > 0 and abs(gap_pct) > 0.5
+                gap_down = gap < 0 and abs(gap_pct) > 0.5
+                
+                # Check if gap has been filled
+                # Gap up filled if price traded at or below previous close
+                # Gap down filled if price traded at or above previous close
+                if gap_up:
+                    gap_filled = low_price <= prev_close
+                elif gap_down:
+                    gap_filled = high_price >= prev_close
+                else:
+                    gap_filled = False
+                
+                # Store gap data
+                self.gap_data = {
+                    'timestamp': ts_now,
+                    'previous_close': prev_close,
+                    'open_price': open_price,
+                    'current_price': current_price,
+                    'gap': gap,
+                    'gap_pct': gap_pct,
+                    'gap_up': gap_up,
+                    'gap_down': gap_down,
+                    'gap_filled': gap_filled,
+                    'high_price': high_price,
+                    'low_price': low_price
+                }
+                
+                # Track gap fills in history
+                if gap_up or gap_down:
+                    self.gap_history.append(self.gap_data.copy())
             
             # Track ticker history for trend analysis
             self.ticker_history.append(self.ticker_data.copy())
@@ -10045,7 +10204,44 @@ class MarketClient:
             cutoff = close_time - timedelta(minutes=VOL_WINDOW_MINS)
             while self.vol_closes and self.vol_closes[0][0] < cutoff:
                 self.vol_closes.popleft()
-            if k["x"]:  # bar just closed
+            
+            # PHASE 1 FEATURE 1: Taker Buy/Sell Pressure from kline
+            # Extract taker buy/sell volumes (Phase 1 Feature)
+            taker_buy_base_vol = float(k.get("V", 0))  # Taker buy base asset volume
+            taker_buy_quote_vol = float(k.get("Q", 0))  # Taker buy quote asset volume
+            total_base_vol = float(k.get("v", 0))  # Total base asset volume
+            total_quote_vol = float(k.get("q", 0))  # Total quote asset volume
+            
+            # Calculate taker sell volumes (derived)
+            taker_sell_base_vol = total_base_vol - taker_buy_base_vol
+            taker_sell_quote_vol = total_quote_vol - taker_buy_quote_vol
+            
+            # Calculate buy pressure ratio (0 to 1)
+            buy_pressure = taker_buy_base_vol / total_base_vol if total_base_vol > 0 else 0.5
+            sell_pressure = 1 - buy_pressure
+            pressure_imbalance = buy_pressure - sell_pressure  # -1 to +1
+            
+            # Store current bar data
+            self.current_bar_taker_data = {
+                'timestamp': ts_now,
+                'taker_buy_base': taker_buy_base_vol,
+                'taker_sell_base': taker_sell_base_vol,
+                'taker_buy_quote': taker_buy_quote_vol,
+                'taker_sell_quote': taker_sell_quote_vol,
+                'buy_pressure': buy_pressure,
+                'sell_pressure': sell_pressure,
+                'pressure_imbalance': pressure_imbalance,
+                'bar_closed': k.get("x", False)
+            }
+            
+            # If bar closed, add to history
+            if k["x"]:
+                self.taker_buy_pressure_history.append((
+                    ts_now,
+                    buy_pressure,
+                    taker_buy_base_vol,
+                    taker_sell_base_vol
+                ))
                 asyncio.create_task(self._compute_and_print(close_time, k))
         
         # Check if it's time for a 30-second snapshot
@@ -10130,6 +10326,9 @@ class MarketClient:
             # Print Market Mover Detection (institutional trading activity alerts)
             if self.market_mover_detector:
                 self._print_market_mover_alerts()
+            
+            # Print Phase 1 Deep Features
+            self._print_phase1_deep_features()
             
             if PRINT_ALL_FEATURES:
                 # Print ALL features from all remaining feature sets
@@ -10296,6 +10495,161 @@ class MarketClient:
                 print(f"      → 💰 INSTITUTIONAL DISTRIBUTION")
                 print(f"         • Smart money selling detected")
                 print(f"         • Consider short bias")
+        
+        print(f"\n   {'='*70}")
+    
+    def _print_phase1_deep_features(self):
+        """
+        Print Phase 1 Deep Features:
+        1. Taker Buy/Sell Pressure (from kline)
+        2. Multi-Level Depth Zones (L6-L1000)
+        3. Real-time Funding Rate (from @markPrice)
+        4. Previous Close Gap Analysis
+        """
+        print(f"\n  🔬 PHASE 1 DEEP FEATURES:")
+        print(f"   {'-'*70}")
+        
+        # Feature 1: Taker Buy/Sell Pressure
+        if self.current_bar_taker_data:
+            print(f"\n   📊 TAKER BUY/SELL PRESSURE (Current Bar):")
+            data = self.current_bar_taker_data
+            buy_pressure = data.get('buy_pressure', 0) * 100
+            sell_pressure = data.get('sell_pressure', 0) * 100
+            imbalance = data.get('pressure_imbalance', 0)
+            
+            # Color-code based on imbalance
+            if imbalance > 0.2:
+                pressure_emoji = "🟢"
+                bias = "BULLISH"
+            elif imbalance < -0.2:
+                pressure_emoji = "🔴"
+                bias = "BEARISH"
+            else:
+                pressure_emoji = "🟡"
+                bias = "NEUTRAL"
+            
+            print(f"      {pressure_emoji} Buy Pressure: {buy_pressure:.1f}% | Sell Pressure: {sell_pressure:.1f}%")
+            print(f"      • Pressure Imbalance: {imbalance:+.3f} ({bias})")
+            print(f"      • Taker Buy Volume: {data.get('taker_buy_base', 0):.4f}")
+            print(f"      • Taker Sell Volume: {data.get('taker_sell_base', 0):.4f}")
+            
+            # Historical trend (last 10 bars)
+            if len(self.taker_buy_pressure_history) >= 10:
+                recent_pressures = [bp for (_, bp, _, _) in list(self.taker_buy_pressure_history)[-10:]]
+                avg_pressure = safe_mean(recent_pressures)
+                trend = "increasing" if buy_pressure/100 > avg_pressure else "decreasing"
+                print(f"      • 10-Bar Average: {avg_pressure*100:.1f}% (pressure {trend})")
+        
+        # Feature 2: Multi-Level Depth Zones
+        if self.depth_zones_history:
+            print(f"\n   📚 MULTI-LEVEL DEPTH ZONES (Latest Full Depth):")
+            _, zones = self.depth_zones_history[-1]
+            
+            # Display bid zones
+            print(f"      📉 BID ZONES:")
+            print(f"         • L1-L5:       {zones.get('L1_L5_bid', 0):.2f} (Top 5 levels)")
+            print(f"         • L6-L20:      {zones.get('L6_L20_bid', 0):.2f}")
+            print(f"         • L21-L50:     {zones.get('L21_L50_bid', 0):.2f}")
+            print(f"         • L51-L100:    {zones.get('L51_L100_bid', 0):.2f}")
+            print(f"         • L101-L500:   {zones.get('L101_L500_bid', 0):.2f}")
+            print(f"         • L501-L1000:  {zones.get('L501_L1000_bid', 0):.2f}")
+            print(f"         └─ Total Bid Depth: {zones.get('total_bid_depth', 0):.2f}")
+            
+            # Display ask zones
+            print(f"      📈 ASK ZONES:")
+            print(f"         • L1-L5:       {zones.get('L1_L5_ask', 0):.2f} (Top 5 levels)")
+            print(f"         • L6-L20:      {zones.get('L6_L20_ask', 0):.2f}")
+            print(f"         • L21-L50:     {zones.get('L21_L50_ask', 0):.2f}")
+            print(f"         • L51-L100:    {zones.get('L51_L100_ask', 0):.2f}")
+            print(f"         • L101-L500:   {zones.get('L101_L500_ask', 0):.2f}")
+            print(f"         • L501-L1000:  {zones.get('L501_L1000_ask', 0):.2f}")
+            print(f"         └─ Total Ask Depth: {zones.get('total_ask_depth', 0):.2f}")
+            
+            # Concentration ratio
+            concentration = zones.get('concentration_ratio', 0) * 100
+            if concentration > 50:
+                conc_assessment = "HIGH (liquidity concentrated at top)"
+            elif concentration > 30:
+                conc_assessment = "MEDIUM (balanced distribution)"
+            else:
+                conc_assessment = "LOW (deep liquidity available)"
+            
+            print(f"      • Concentration Ratio: {concentration:.1f}% - {conc_assessment}")
+        
+        # Feature 3: Real-time Funding Rate
+        if self.realtime_funding_rate is not None:
+            print(f"\n   💰 REAL-TIME FUNDING RATE:")
+            funding_rate = self.realtime_funding_rate * 100  # Convert to percentage
+            funding_momentum = self.funding_momentum * 100 if self.funding_momentum else 0
+            
+            # Classify funding rate
+            if funding_rate > 0.05:
+                funding_emoji = "🔴"
+                funding_status = "HIGH POSITIVE (Expensive longs)"
+            elif funding_rate > 0.01:
+                funding_emoji = "🟡"
+                funding_status = "POSITIVE (Longs paying shorts)"
+            elif funding_rate > -0.01:
+                funding_emoji = "🟢"
+                funding_status = "NEUTRAL"
+            elif funding_rate > -0.05:
+                funding_emoji = "🟡"
+                funding_status = "NEGATIVE (Shorts paying longs)"
+            else:
+                funding_emoji = "🔴"
+                funding_status = "HIGH NEGATIVE (Expensive shorts)"
+            
+            print(f"      {funding_emoji} Current Rate: {funding_rate:.4f}% - {funding_status}")
+            print(f"      • Funding Momentum: {funding_momentum:+.4f}%")
+            
+            # Get recent funding history for 8-hour estimate
+            if len(self.realtime_funding_history) > 0:
+                recent_rates = [r for (_, r, _, _) in list(self.realtime_funding_history)[-10:]]
+                avg_rate = safe_mean(recent_rates) * 100
+                print(f"      • Recent Average: {avg_rate:.4f}%")
+                
+                # 8-hour funding estimate (assuming 3 funding periods per day)
+                eight_hour_estimate = funding_rate * 3  # Rough estimate
+                print(f"      • Daily Estimate (3x): {eight_hour_estimate:.4f}%")
+        
+        # Feature 4: Previous Close Gap Analysis
+        if self.gap_data:
+            print(f"\n   📉 PREVIOUS CLOSE GAP ANALYSIS:")
+            gap = self.gap_data.get('gap', 0)
+            gap_pct = self.gap_data.get('gap_pct', 0)
+            gap_up = self.gap_data.get('gap_up', False)
+            gap_down = self.gap_data.get('gap_down', False)
+            gap_filled = self.gap_data.get('gap_filled', False)
+            
+            if gap_up or gap_down:
+                gap_type = "GAP UP ⬆️" if gap_up else "GAP DOWN ⬇️"
+                gap_emoji = "🟢" if gap_up else "🔴"
+                
+                print(f"      {gap_emoji} {gap_type} DETECTED")
+                print(f"         • Previous Close: ${self.gap_data.get('previous_close', 0):.2f}")
+                print(f"         • Open Price: ${self.gap_data.get('open_price', 0):.2f}")
+                print(f"         • Gap Size: ${gap:+.2f} ({gap_pct:+.2f}%)")
+                print(f"         • Current Price: ${self.gap_data.get('current_price', 0):.2f}")
+                
+                if gap_filled:
+                    print(f"         └─ ✅ GAP FILLED (price returned to prev close)")
+                else:
+                    print(f"         └─ ❌ GAP NOT FILLED YET")
+                    if gap_up:
+                        print(f"            • Fill target: Price drops to ${self.gap_data.get('previous_close', 0):.2f}")
+                    else:
+                        print(f"            • Fill target: Price rises to ${self.gap_data.get('previous_close', 0):.2f}")
+                
+                # Gap fill statistics
+                if len(self.gap_history) > 1:
+                    filled_count = sum(1 for g in self.gap_history if g.get('gap_filled', False))
+                    total_gaps = len(self.gap_history)
+                    fill_rate = (filled_count / total_gaps) * 100 if total_gaps > 0 else 0
+                    print(f"         • Historical Fill Rate: {fill_rate:.1f}% ({filled_count}/{total_gaps} gaps)")
+            else:
+                print(f"      ✅ NO SIGNIFICANT GAP (gap < 0.5%)")
+                print(f"         • Previous Close: ${self.gap_data.get('previous_close', 0):.2f}")
+                print(f"         • Open Price: ${self.gap_data.get('open_price', 0):.2f}")
         
         print(f"\n   {'='*70}")
 
