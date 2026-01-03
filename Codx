@@ -13088,14 +13088,16 @@ class MarketMoverDetector:
     5. Smart money flow (CVD analysis + institutional timing)
     """
     
-    def __init__(self, detection_window: int = 300):
+    def __init__(self, detection_window: int = 300, tick_size: float = 0.01):
         """
         Initialize market mover detector.
         
         Args:
             detection_window: Time window in seconds for detection (default: 5 minutes)
+            tick_size: Price tick size for grouping (default: 0.01 for most crypto)
         """
         self.detection_window = detection_window
+        self.tick_size = tick_size
         
         # Detection buffers
         self.trade_history = deque(maxlen=10000)  # (timestamp, price, quantity, side)
@@ -13206,7 +13208,7 @@ class MarketMoverDetector:
         from collections import defaultdict
         price_groups = defaultdict(list)
         for ts, price, qty, side in recent_trades:
-            price_tick = round(price, 2)  # Round to 2 decimals
+            price_tick = round(price / self.tick_size) * self.tick_size
             price_groups[price_tick].append((ts, qty, side))
         
         # Check for repeated trades at same price
@@ -13218,7 +13220,7 @@ class MarketMoverDetector:
                 std_size = safe_std(quantities)
                 
                 # Iceberg pattern: similar sizes with low variance
-                if std_size / avg_size < 0.2 if avg_size > 0 else False:
+                if avg_size > 0 and std_size / avg_size < 0.2:
                     total_qty = sum(quantities)
                     side = trades[-1][2]
                     
@@ -13303,7 +13305,8 @@ class MarketMoverDetector:
         
         # Calculate baseline spread (median of recent history)
         recent_spreads = [s for (_, s) in list(self.spread_history)[-100:]]
-        self.baseline_spread = safe_mean(recent_spreads[:50]) if len(recent_spreads) >= 50 else safe_mean(recent_spreads)
+        baseline_slice = recent_spreads[:50] if len(recent_spreads) >= 50 else recent_spreads
+        self.baseline_spread = safe_mean(baseline_slice)
         
         # Calculate baseline liquidity
         recent_liquidity = [liq for (_, liq) in list(self.liquidity_history)[-100:]]
