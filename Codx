@@ -4219,8 +4219,11 @@ class AdvancedOrderFlow:
         # ===== TIER 2: Core Depth Metrics =====
         snapshot["tier2"] = self._compute_tier2_depth_metrics(cutoff_time)
         
+        # ===== PHASE 3 FEATURE 11: Market Stress Indicators =====
+        self._calculate_market_stress_indicators(snapshot)
+        
         # Store snapshot
-        self.snapshot_history.append(snapshot)
+        self.snapshot_history.append((current_time, snapshot))
         self.last_snapshot_time = current_time
         
         # Reset 30s accumulators
@@ -9611,6 +9614,29 @@ class MarketClient:
         # Feature 8: Correlation Matrix (cross-symbol)
         self.correlation_matrix_history = deque(maxlen=50)  # Correlation snapshots
         self.price_returns_buffer = {}  # Buffer for calculating returns across symbols
+        self.correlation_matrix = {}  # Current correlation data
+        
+        # ─── Phase 3 Deep Features ────────────────────────────
+        # Feature 9: Order ID Correlation (HFT pattern detection)
+        self.order_id_tracking = deque(maxlen=1000)  # Track order IDs from trade stream
+        self.order_id_gaps = deque(maxlen=100)  # Track gaps in order ID sequences
+        self.order_id_patterns = {}  # Detected HFT patterns
+        self.last_order_id = None
+        
+        # Feature 10: Network Latency Tracking (execution optimization)
+        self.latency_measurements = deque(maxlen=500)  # Event time vs trade time differences
+        self.latency_stats = {}  # Current latency statistics
+        self.latency_percentiles = {}  # P50, P90, P95, P99
+        
+        # Feature 11: Market Stress Indicators (risk assessment)
+        self.stress_indicators = {}  # Current market stress metrics
+        self.stress_history = deque(maxlen=100)  # Historical stress levels
+        self.volatility_spikes = deque(maxlen=50)  # Track volatility spike events
+        
+        # Feature 12: Order Book Update Frequency (quote stuffing detection)
+        self.update_frequency_tracker = deque(maxlen=200)  # Track update timestamps
+        self.update_frequency_stats = {}  # Current update frequency metrics
+        self.quote_stuffing_events = deque(maxlen=50)  # Detected quote stuffing
 
     def _fetch_full_depth_snapshot(self):
         """
@@ -10042,6 +10068,360 @@ class MarketClient:
         except Exception:
             return None
     
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 3 DEEP FEATURES - High-Complexity, High-Value Analytics
+    # ═══════════════════════════════════════════════════════════════
+    
+    def _track_order_id_correlation(self, order_id, trade_time, timestamp):
+        """
+        Feature 9: Order ID Correlation - HFT Pattern Detection
+        Analyzes order ID sequences to detect:
+        - Sequential order IDs (HFT algorithms)
+        - Large gaps (missing orders, cancellations)
+        - Burst patterns (coordinated trading)
+        """
+        try:
+            if not order_id or order_id == 0:
+                return
+            
+            # Track order ID
+            self.order_id_tracking.append({
+                'order_id': order_id,
+                'trade_time': trade_time,
+                'timestamp': timestamp
+            })
+            
+            # Detect gaps and patterns
+            if self.last_order_id is not None:
+                gap = order_id - self.last_order_id
+                
+                if gap > 1:  # Gap detected
+                    self.order_id_gaps.append({
+                        'timestamp': timestamp,
+                        'from_id': self.last_order_id,
+                        'to_id': order_id,
+                        'gap_size': gap,
+                        'time_diff': trade_time - self.order_id_tracking[-2]['trade_time'] if len(self.order_id_tracking) >= 2 else 0
+                    })
+            
+            self.last_order_id = order_id
+            
+            # Analyze patterns every 100 orders
+            if len(self.order_id_tracking) >= 100:
+                self._analyze_order_id_patterns()
+                
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error tracking order ID: {e}")
+    
+    def _analyze_order_id_patterns(self):
+        """Analyze order ID patterns to detect HFT activity."""
+        try:
+            recent_ids = [o['order_id'] for o in list(self.order_id_tracking)[-100:]]
+            
+            # Calculate sequential ratio (how many IDs are sequential)
+            sequential_count = sum(1 for i in range(1, len(recent_ids)) 
+                                   if recent_ids[i] - recent_ids[i-1] == 1)
+            sequential_ratio = sequential_count / (len(recent_ids) - 1) if len(recent_ids) > 1 else 0
+            
+            # Calculate average gap size
+            gaps = [recent_ids[i] - recent_ids[i-1] for i in range(1, len(recent_ids))]
+            avg_gap = safe_mean(gaps)
+            max_gap = max(gaps) if gaps else 0
+            
+            # Detect burst patterns (many orders in short time)
+            recent_times = [o['trade_time'] for o in list(self.order_id_tracking)[-100:]]
+            if len(recent_times) >= 2:
+                time_span = recent_times[-1] - recent_times[0]
+                orders_per_second = len(recent_times) / time_span if time_span > 0 else 0
+            else:
+                orders_per_second = 0
+            
+            # Classification
+            if sequential_ratio > 0.7 and orders_per_second > 50:
+                pattern = "HFT_MARKET_MAKER"
+                confidence = "HIGH"
+            elif sequential_ratio > 0.5 and orders_per_second > 20:
+                pattern = "HFT_ALGO"
+                confidence = "MEDIUM"
+            elif avg_gap > 100:
+                pattern = "SPARSE_TRADING"
+                confidence = "LOW"
+            else:
+                pattern = "MIXED"
+                confidence = "LOW"
+            
+            self.order_id_patterns = {
+                'timestamp': time.time(),
+                'pattern': pattern,
+                'confidence': confidence,
+                'sequential_ratio': sequential_ratio,
+                'avg_gap': avg_gap,
+                'max_gap': max_gap,
+                'orders_per_second': orders_per_second,
+                'total_gaps_detected': len(self.order_id_gaps),
+                'sample_size': len(recent_ids)
+            }
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error analyzing order ID patterns: {e}")
+    
+    def _track_network_latency(self, event_time_ms, trade_time_ms, timestamp):
+        """
+        Feature 10: Network Latency Tracking - Execution Optimization
+        Measures the time difference between event generation and trade execution
+        to identify network delays and optimize execution timing.
+        """
+        try:
+            # Calculate latency (event time - trade time)
+            latency_ms = abs(event_time_ms - trade_time_ms)
+            
+            # Store latency measurement
+            self.latency_measurements.append({
+                'timestamp': timestamp,
+                'latency_ms': latency_ms,
+                'event_time': event_time_ms,
+                'trade_time': trade_time_ms
+            })
+            
+            # Calculate latency statistics every 50 measurements
+            if len(self.latency_measurements) >= 50:
+                recent_latencies = [m['latency_ms'] for m in list(self.latency_measurements)[-500:]]
+                
+                # Calculate percentiles
+                sorted_latencies = sorted(recent_latencies)
+                n = len(sorted_latencies)
+                
+                p50_idx = int(n * 0.50)
+                p90_idx = int(n * 0.90)
+                p95_idx = int(n * 0.95)
+                p99_idx = int(n * 0.99)
+                
+                self.latency_percentiles = {
+                    'p50': sorted_latencies[p50_idx] if p50_idx < n else 0,
+                    'p90': sorted_latencies[p90_idx] if p90_idx < n else 0,
+                    'p95': sorted_latencies[p95_idx] if p95_idx < n else 0,
+                    'p99': sorted_latencies[p99_idx] if p99_idx < n else 0
+                }
+                
+                # Calculate average and classify
+                avg_latency = safe_mean(recent_latencies)
+                std_latency = safe_std(recent_latencies)
+                
+                # Classification
+                if avg_latency < 10:
+                    latency_class = "EXCELLENT"
+                    quality_emoji = "🟢"
+                elif avg_latency < 50:
+                    latency_class = "GOOD"
+                    quality_emoji = "🟡"
+                elif avg_latency < 100:
+                    latency_class = "MODERATE"
+                    quality_emoji = "🟠"
+                else:
+                    latency_class = "POOR"
+                    quality_emoji = "🔴"
+                
+                self.latency_stats = {
+                    'timestamp': timestamp,
+                    'avg_latency_ms': avg_latency,
+                    'std_latency_ms': std_latency,
+                    'min_latency_ms': min(recent_latencies),
+                    'max_latency_ms': max(recent_latencies),
+                    'latency_class': latency_class,
+                    'quality_emoji': quality_emoji,
+                    'sample_size': len(recent_latencies)
+                }
+                
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error tracking network latency: {e}")
+    
+    def _calculate_market_stress_indicators(self, snapshot):
+        """
+        Feature 11: Market Stress Indicators - Risk Assessment
+        Calculates composite stress metrics from multiple sources:
+        - Spread widening
+        - Liquidity depletion
+        - Volatility spikes
+        - Volume surges
+        """
+        try:
+            timestamp = snapshot.get('timestamp', time.time())
+            
+            # 1. Spread stress (spread widening relative to normal)
+            current_spread = snapshot.get('bid_ask_spread', 0)
+            avg_spread = safe_mean([s.get('bid_ask_spread', 0) for _, s in list(self.snapshot_history)[-30:]])
+            spread_stress = (current_spread / avg_spread - 1) if avg_spread > 0 else 0
+            spread_stress = max(0, min(spread_stress * 100, 100))  # 0-100 scale
+            
+            # 2. Liquidity stress (top-of-book liquidity depletion)
+            current_depth = snapshot.get('depth_metrics', {}).get('ask_depth_tier1', 0) + \
+                          snapshot.get('depth_metrics', {}).get('bid_depth_tier1', 0)
+            avg_depth = safe_mean([
+                s.get('depth_metrics', {}).get('ask_depth_tier1', 0) + 
+                s.get('depth_metrics', {}).get('bid_depth_tier1', 0) 
+                for _, s in list(self.snapshot_history)[-30:]
+            ])
+            liquidity_stress = (1 - current_depth / avg_depth) * 100 if avg_depth > 0 else 0
+            liquidity_stress = max(0, min(liquidity_stress, 100))
+            
+            # 3. Volatility stress (recent volatility vs average)
+            recent_prices = [s.get('mark_price', 0) for _, s in list(self.snapshot_history)[-10:]]
+            if len(recent_prices) >= 2:
+                recent_returns = [(recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1] 
+                                  for i in range(1, len(recent_prices)) if recent_prices[i-1] > 0]
+                recent_vol = safe_std(recent_returns) * 100 if recent_returns else 0
+                
+                # Compare to longer-term volatility
+                all_prices = [s.get('mark_price', 0) for _, s in list(self.snapshot_history)[-60:]]
+                if len(all_prices) >= 2:
+                    all_returns = [(all_prices[i] - all_prices[i-1]) / all_prices[i-1] 
+                                   for i in range(1, len(all_prices)) if all_prices[i-1] > 0]
+                    avg_vol = safe_std(all_returns) * 100 if all_returns else 0
+                    
+                    volatility_stress = (recent_vol / avg_vol - 1) * 100 if avg_vol > 0 else 0
+                    volatility_stress = max(0, min(volatility_stress, 100))
+                else:
+                    volatility_stress = 0
+            else:
+                volatility_stress = 0
+            
+            # 4. Volume stress (volume surge detection)
+            current_volume = snapshot.get('volume_metrics', {}).get('total_volume', 0)
+            avg_volume = safe_mean([s.get('volume_metrics', {}).get('total_volume', 0) 
+                                    for _, s in list(self.snapshot_history)[-30:]])
+            volume_stress = (current_volume / avg_volume - 1) * 100 if avg_volume > 0 else 0
+            volume_stress = max(0, min(volume_stress, 100))
+            
+            # Composite stress index (weighted average)
+            composite_stress = (
+                spread_stress * 0.30 +
+                liquidity_stress * 0.30 +
+                volatility_stress * 0.25 +
+                volume_stress * 0.15
+            )
+            
+            # Classification
+            if composite_stress > 60:
+                stress_level = "EXTREME"
+                stress_emoji = "🔴"
+            elif composite_stress > 40:
+                stress_level = "HIGH"
+                stress_emoji = "🟠"
+            elif composite_stress > 20:
+                stress_level = "MODERATE"
+                stress_emoji = "🟡"
+            else:
+                stress_level = "LOW"
+                stress_emoji = "🟢"
+            
+            self.stress_indicators = {
+                'timestamp': timestamp,
+                'composite_stress': composite_stress,
+                'stress_level': stress_level,
+                'stress_emoji': stress_emoji,
+                'spread_stress': spread_stress,
+                'liquidity_stress': liquidity_stress,
+                'volatility_stress': volatility_stress,
+                'volume_stress': volume_stress
+            }
+            
+            # Store in history
+            self.stress_history.append((timestamp, self.stress_indicators.copy()))
+            
+            # Detect volatility spikes
+            if volatility_stress > 50:
+                self.volatility_spikes.append({
+                    'timestamp': timestamp,
+                    'stress_level': volatility_stress,
+                    'recent_vol': recent_vol if 'recent_vol' in locals() else 0
+                })
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error calculating market stress: {e}")
+    
+    def _track_update_frequency(self, update_type, timestamp):
+        """
+        Feature 12: Order Book Update Frequency - Quote Stuffing Detection
+        Tracks the frequency of order book updates to detect quote stuffing
+        (rapid order book updates used to create latency or confusion).
+        """
+        try:
+            # Track update timestamp
+            self.update_frequency_tracker.append({
+                'timestamp': timestamp,
+                'update_type': update_type,  # 'depth', 'trade', 'ticker', etc.
+                'time_ms': int(timestamp * 1000)
+            })
+            
+            # Calculate update frequency every 20 updates
+            if len(self.update_frequency_tracker) >= 20:
+                recent_updates = list(self.update_frequency_tracker)[-200:]
+                
+                # Calculate updates per second
+                if len(recent_updates) >= 2:
+                    time_span = recent_updates[-1]['timestamp'] - recent_updates[0]['timestamp']
+                    updates_per_second = len(recent_updates) / time_span if time_span > 0 else 0
+                else:
+                    updates_per_second = 0
+                
+                # Calculate time between updates
+                time_diffs = []
+                for i in range(1, len(recent_updates)):
+                    diff_ms = (recent_updates[i]['timestamp'] - recent_updates[i-1]['timestamp']) * 1000
+                    time_diffs.append(diff_ms)
+                
+                avg_time_between_ms = safe_mean(time_diffs)
+                min_time_between_ms = min(time_diffs) if time_diffs else 0
+                
+                # Detect quote stuffing (extremely high update frequency)
+                if updates_per_second > 100 and min_time_between_ms < 5:
+                    stuffing_detected = True
+                    severity = "HIGH"
+                elif updates_per_second > 50 and min_time_between_ms < 10:
+                    stuffing_detected = True
+                    severity = "MEDIUM"
+                else:
+                    stuffing_detected = False
+                    severity = "NONE"
+                
+                # Classification
+                if updates_per_second > 100:
+                    frequency_class = "EXTREME"
+                    freq_emoji = "🔴"
+                elif updates_per_second > 50:
+                    frequency_class = "HIGH"
+                    freq_emoji = "🟠"
+                elif updates_per_second > 20:
+                    frequency_class = "MODERATE"
+                    freq_emoji = "🟡"
+                else:
+                    frequency_class = "NORMAL"
+                    freq_emoji = "🟢"
+                
+                self.update_frequency_stats = {
+                    'timestamp': timestamp,
+                    'updates_per_second': updates_per_second,
+                    'avg_time_between_ms': avg_time_between_ms,
+                    'min_time_between_ms': min_time_between_ms,
+                    'frequency_class': frequency_class,
+                    'freq_emoji': freq_emoji,
+                    'quote_stuffing_detected': stuffing_detected,
+                    'stuffing_severity': severity,
+                    'sample_size': len(recent_updates)
+                }
+                
+                # Track quote stuffing events
+                if stuffing_detected:
+                    self.quote_stuffing_events.append({
+                        'timestamp': timestamp,
+                        'severity': severity,
+                        'updates_per_second': updates_per_second,
+                        'min_time_ms': min_time_between_ms
+                    })
+            
+        except Exception as e:
+            print(f"[{self.name}] ⚠️  Error tracking update frequency: {e}")
+    
     async def _load_historical_data(self, symbol):
         """
         1) Load daily/weekly POC + monthly HVNs (past ~180 days).
@@ -10235,6 +10615,9 @@ class MarketClient:
                         self.advanced_orderflow.process_order_event(
                             ts_now, "cancel", side, price, q_prev - q_curr
                         )
+            
+            # PHASE 3 FEATURE 12: Track depth update frequency
+            self._track_update_frequency('depth', ts_now)
 
         # 2) AggTrade updates
         elif s.endswith("@aggTrade"):
@@ -10345,6 +10728,15 @@ class MarketClient:
                 'side': side,
                 'num_component_trades': num_trades
             })
+            
+            # PHASE 3 FEATURE 10: Network Latency Tracking
+            # Track latency between event time and trade time
+            if event_time > 0 and trade_time > 0:
+                self._track_network_latency(event_time, trade_time, ts_t)
+            
+            # PHASE 3 FEATURE 12: Order Book Update Frequency
+            # Track update frequency for quote stuffing detection
+            self._track_update_frequency('aggTrade', ts_t)
 
         # 3) Trade ticks
         elif s.endswith("@trade"):
@@ -10356,6 +10748,22 @@ class MarketClient:
                 sign       = 1 if price > prev_price else (-1 if price < prev_price else 0)
                 self.tick_signs.append(sign)
             self.trade_count["Sell" if d["m"] else "Buy"] += 1
+            
+            # PHASE 3 FEATURE 9: Order ID Correlation (HFT pattern detection)
+            # Extract order ID and timestamps from trade stream
+            order_id = int(d.get("t", 0))  # Trade ID
+            trade_time = int(d.get("T", 0))  # Trade time in milliseconds
+            if order_id > 0:
+                self._track_order_id_correlation(order_id, trade_time / 1000, ts_now)
+            
+            # PHASE 3 FEATURE 10: Network Latency Tracking
+            # Track latency from trade stream as well
+            event_time = int(d.get("E", 0))  # Event time
+            if event_time > 0 and trade_time > 0:
+                self._track_network_latency(event_time, trade_time, ts_now)
+            
+            # PHASE 3 FEATURE 12: Update Frequency Tracking
+            self._track_update_frequency('trade', ts_now)
 
         # 4) Liquidations (forceOrder)
         elif s.endswith("@forceOrder"):
@@ -10734,6 +11142,9 @@ class MarketClient:
             
             # Print Phase 2 Deep Features
             self._print_phase2_deep_features()
+            
+            # Print Phase 3 Deep Features
+            self._print_phase3_deep_features()
             
             if PRINT_ALL_FEATURES:
                 # Print ALL features from all remaining feature sets
@@ -11231,6 +11642,151 @@ class MarketClient:
             print(f"\n      {emoji} Market Regime: {regime}")
             print(f"         • Average Correlation: {avg_corr:+.3f}")
             print(f"         • Symbols Analyzed: {total_symbols}")
+        
+        print(f"\n   {'='*70}")
+    
+    def _print_phase3_deep_features(self):
+        """
+        Print Phase 3 Deep Features:
+        9. Order ID Correlation (HFT pattern detection)
+        10. Network Latency Tracking (execution optimization)
+        11. Market Stress Indicators (risk assessment)
+        12. Order Book Update Frequency (quote stuffing detection)
+        """
+        print(f"\n  🔬 PHASE 3 DEEP FEATURES:")
+        print(f"   {'-'*70}")
+        
+        # Feature 9: Order ID Correlation
+        if self.order_id_patterns:
+            print(f"\n   🔢 ORDER ID CORRELATION (HFT Pattern Detection):")
+            patterns = self.order_id_patterns
+            pattern = patterns.get('pattern', 'UNKNOWN')
+            confidence = patterns.get('confidence', 'UNKNOWN')
+            
+            # Pattern emojis
+            if pattern == "HFT_MARKET_MAKER":
+                pattern_emoji = "⚡"
+                pattern_desc = "HFT Market Making Detected"
+            elif pattern == "HFT_ALGO":
+                pattern_emoji = "🤖"
+                pattern_desc = "HFT Algorithmic Trading"
+            elif pattern == "SPARSE_TRADING":
+                pattern_emoji = "🐌"
+                pattern_desc = "Sparse Manual Trading"
+            else:
+                pattern_emoji = "🔀"
+                pattern_desc = "Mixed Trading Pattern"
+            
+            print(f"      {pattern_emoji} Pattern: {pattern_desc} ({confidence} confidence)")
+            print(f"      • Sequential Ratio: {patterns.get('sequential_ratio', 0):.2%}")
+            print(f"      • Avg Order ID Gap: {patterns.get('avg_gap', 0):.1f}")
+            print(f"      • Max Order ID Gap: {patterns.get('max_gap', 0):.0f}")
+            print(f"      • Orders/Second: {patterns.get('orders_per_second', 0):.1f}")
+            print(f"      • Total Gaps Detected: {patterns.get('total_gaps_detected', 0)}")
+            
+            # Trading implications
+            if pattern == "HFT_MARKET_MAKER":
+                print(f"      💡 IMPLICATIONS:")
+                print(f"         • High-frequency market making active")
+                print(f"         • Tight spreads likely maintained")
+                print(f"         • Fast execution possible")
+            elif pattern == "SPARSE_TRADING":
+                print(f"      💡 IMPLICATIONS:")
+                print(f"         • Low trading activity")
+                print(f"         • Wider spreads possible")
+                print(f"         • Consider liquidity carefully")
+        
+        # Feature 10: Network Latency Tracking
+        if self.latency_stats:
+            print(f"\n   🌐 NETWORK LATENCY (Execution Optimization):")
+            stats = self.latency_stats
+            quality_emoji = stats.get('quality_emoji', '⚪')
+            latency_class = stats.get('latency_class', 'UNKNOWN')
+            
+            print(f"      {quality_emoji} Latency Quality: {latency_class}")
+            print(f"      • Average Latency: {stats.get('avg_latency_ms', 0):.2f}ms")
+            print(f"      • Std Deviation: {stats.get('std_latency_ms', 0):.2f}ms")
+            print(f"      • Min Latency: {stats.get('min_latency_ms', 0):.2f}ms")
+            print(f"      • Max Latency: {stats.get('max_latency_ms', 0):.2f}ms")
+            
+            # Show percentiles if available
+            if self.latency_percentiles:
+                p = self.latency_percentiles
+                print(f"      • Latency Percentiles:")
+                print(f"         - P50 (Median): {p.get('p50', 0):.2f}ms")
+                print(f"         - P90: {p.get('p90', 0):.2f}ms")
+                print(f"         - P95: {p.get('p95', 0):.2f}ms")
+                print(f"         - P99: {p.get('p99', 0):.2f}ms")
+            
+            # Execution quality implications
+            if latency_class in ["EXCELLENT", "GOOD"]:
+                print(f"      💡 Low latency - optimal execution conditions")
+            elif latency_class == "POOR":
+                print(f"      ⚠️  High latency - execution quality may suffer")
+        
+        # Feature 11: Market Stress Indicators
+        if self.stress_indicators:
+            print(f"\n   ⚡ MARKET STRESS INDICATORS (Risk Assessment):")
+            stress = self.stress_indicators
+            stress_emoji = stress.get('stress_emoji', '⚪')
+            stress_level = stress.get('stress_level', 'UNKNOWN')
+            composite = stress.get('composite_stress', 0)
+            
+            print(f"      {stress_emoji} Stress Level: {stress_level}")
+            print(f"      • Composite Stress Index: {composite:.1f}/100")
+            print(f"      • Component Breakdown:")
+            print(f"         - Spread Stress: {stress.get('spread_stress', 0):.1f}/100")
+            print(f"         - Liquidity Stress: {stress.get('liquidity_stress', 0):.1f}/100")
+            print(f"         - Volatility Stress: {stress.get('volatility_stress', 0):.1f}/100")
+            print(f"         - Volume Stress: {stress.get('volume_stress', 0):.1f}/100")
+            
+            # Recent volatility spikes
+            if len(self.volatility_spikes) > 0:
+                recent_spikes = len([s for s in list(self.volatility_spikes)[-10:] 
+                                     if time.time() - s['timestamp'] < 300])  # Last 5 min
+                if recent_spikes > 0:
+                    print(f"      ⚠️  {recent_spikes} volatility spike(s) in last 5 minutes")
+            
+            # Risk implications
+            if stress_level in ["EXTREME", "HIGH"]:
+                print(f"      💡 RISK IMPLICATIONS:")
+                print(f"         • 🔴 High market stress detected")
+                print(f"         • Reduce position sizes")
+                print(f"         • Widen stop losses")
+                print(f"         • Consider exiting volatile positions")
+            elif stress_level == "LOW":
+                print(f"      💡 Low stress - normal market conditions")
+        
+        # Feature 12: Order Book Update Frequency
+        if self.update_frequency_stats:
+            print(f"\n   📡 UPDATE FREQUENCY (Quote Stuffing Detection):")
+            freq = self.update_frequency_stats
+            freq_emoji = freq.get('freq_emoji', '⚪')
+            freq_class = freq.get('frequency_class', 'UNKNOWN')
+            
+            print(f"      {freq_emoji} Update Frequency: {freq_class}")
+            print(f"      • Updates/Second: {freq.get('updates_per_second', 0):.1f}")
+            print(f"      • Avg Time Between Updates: {freq.get('avg_time_between_ms', 0):.2f}ms")
+            print(f"      • Min Time Between Updates: {freq.get('min_time_between_ms', 0):.2f}ms")
+            
+            # Quote stuffing detection
+            if freq.get('quote_stuffing_detected', False):
+                severity = freq.get('stuffing_severity', 'UNKNOWN')
+                severity_emoji = {'HIGH': '🔴', 'MEDIUM': '🟠', 'LOW': '🟡'}.get(severity, '⚪')
+                
+                print(f"      {severity_emoji} QUOTE STUFFING DETECTED ({severity} severity)")
+                print(f"      💡 IMPLICATIONS:")
+                print(f"         • Potential latency arbitrage in progress")
+                print(f"         • Order book may be unreliable")
+                print(f"         • Consider delaying trades until frequency normalizes")
+                
+                # Show recent quote stuffing events
+                recent_events = [e for e in list(self.quote_stuffing_events)[-5:] 
+                                if time.time() - e['timestamp'] < 60]  # Last minute
+                if recent_events:
+                    print(f"         • {len(recent_events)} event(s) in last minute")
+            else:
+                print(f"      ✅ No quote stuffing detected - normal update rate")
         
         print(f"\n   {'='*70}")
 
