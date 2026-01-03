@@ -2544,7 +2544,7 @@ except Exception as e:
 
 class AdvancedOrderFlow:
     """
-    Advanced Order Flow Analyzer with 30-second snapshot computation.
+    Advanced Order Flow Analyzer with 5-minute snapshot computation.
     Implements comprehensive market microstructure features for advanced order flow analysis.
     """
     
@@ -2552,12 +2552,12 @@ class AdvancedOrderFlow:
     DATA_QUALITY_THRESHOLD = 70  # Minimum quality score (0-100) to avoid warnings
     MIN_UNIQUE_VOLUMES = 5  # Minimum unique volume values for healthy distribution
     
-    def __init__(self, snapshot_interval: int = 30, max_history: int = 100):
+    def __init__(self, snapshot_interval: int = 300, max_history: int = 100):
         """
         Initialize the Advanced Order Flow Analyzer.
         
         Args:
-            snapshot_interval: Interval in seconds for feature computation (default: 30)
+            snapshot_interval: Interval in seconds for feature computation (default: 300 = 5 minutes)
             max_history: Maximum number of historical snapshots to retain
         """
         self.snapshot_interval = snapshot_interval
@@ -4175,7 +4175,7 @@ class AdvancedOrderFlow:
     
     def compute_snapshot(self, current_time: Optional[datetime] = None) -> Dict[str, Any]:
         """
-        Compute a 30-second snapshot of all features.
+        Compute a 5-minute snapshot of all features.
         
         Returns:
             Dictionary containing all computed features
@@ -9264,7 +9264,7 @@ FEATURE_HISTORY_LENGTH = 50
 S_R_LOOKBACK_MINS      = 15
 
 # Advanced Order Flow Configuration
-ADVANCED_SNAPSHOT_INTERVAL = 30  # 30-second snapshots
+ADVANCED_SNAPSHOT_INTERVAL = 300  # 5-minute snapshots (changed from 30 seconds for more comprehensive analysis)
 ENABLE_ADVANCED_ORDERFLOW  = True  # Enable/disable advanced order flow analysis
 FEATURE_VECTOR_EXPORT      = True  # Export ML-ready feature vectors
 PRINT_ALL_FEATURES         = True  # Print all 126 features (True) or summary only (False)
@@ -9934,7 +9934,7 @@ class MarketClient:
             )
             self.feature_extractor = FeatureExtractor(window_size=100)
             self.last_advanced_snapshot = datetime.now(timezone.utc)
-            print(f"[{self.name}] ✅ Advanced Order Flow Analysis enabled (30s intervals)")
+            print(f"[{self.name}] ✅ Advanced Order Flow Analysis enabled (5-minute intervals)")
         else:
             self.advanced_orderflow = None
             self.feature_extractor = None
@@ -11457,7 +11457,7 @@ class MarketClient:
                 
                 asyncio.create_task(self._compute_and_print(close_time, k))
         
-        # Check if it's time for a 30-second snapshot
+        # Check if it's time for a 5-minute snapshot
         if self.advanced_orderflow:
             current_time = datetime.now(timezone.utc)
             elapsed = (current_time - self.last_advanced_snapshot).total_seconds()
@@ -11470,7 +11470,7 @@ class MarketClient:
         await asyncio.to_thread(self.compute_features, close_time, k)
     
     async def _compute_advanced_snapshot(self, current_time):
-        """Compute and print 30-second advanced order flow snapshot."""
+        """Compute and print 5-minute advanced order flow snapshot."""
         await asyncio.to_thread(self._compute_advanced_snapshot_sync, current_time)
     
     def _compute_advanced_snapshot_sync(self, current_time):
@@ -11491,7 +11491,7 @@ class MarketClient:
             
             # Print summary
             print(f"\n[{self.name}] 🚀 ADVANCED ORDER FLOW @ {current_time.strftime('%H:%M:%S')}")
-            print(f"  ⏱️  30-second snapshot #{len(self.advanced_orderflow.snapshot_history)}")
+            print(f"  ⏱️  5-minute snapshot #{len(self.advanced_orderflow.snapshot_history)}")
             
             # Print unified order book analysis (consolidates all order book metrics in one layer)
             self._print_unified_order_book_analysis(snapshot)
