@@ -2717,6 +2717,7 @@ class AdvancedOrderFlow:
         
         # Trade statistics - ENHANCED BUFFER (10K trades)
         self.trade_sizes = deque(maxlen=10000)
+        self.trade_prices = deque(maxlen=10000)  # For Phase 5 volume analytics
         self.trade_size_distribution = {}
         self.trade_intensity = 0.0                        # Trades per second
         
@@ -3288,6 +3289,7 @@ class AdvancedOrderFlow:
         
         # Trade sizes
         self.trade_sizes.append(quantity)
+        self.trade_prices.append(price)  # For Phase 5 volume analytics
         self.trade_timestamps.append(timestamp)
         
         # Price changes
@@ -4250,6 +4252,22 @@ class AdvancedOrderFlow:
         # Category 5: Composite Intelligence
         snapshot["phase4_regime_classifier"] = self._compute_regime_classifier(cutoff_time)
         snapshot["phase4_liquidity_absorption"] = self._compute_liquidity_absorption(cutoff_time)
+        
+        # ===== PHASE 5: ADVANCED VOLUME ANALYTICS (VOLUME-PRICE RELATIONSHIPS) =====
+        
+        # Category 1: Volume-Price Dynamics
+        snapshot["phase5_volume_price_momentum"] = self._compute_volume_price_momentum(cutoff_time)
+        snapshot["phase5_volume_surge"] = self._compute_volume_surge(cutoff_time)
+        snapshot["phase5_volume_profile_analysis"] = self._compute_volume_profile_analysis(cutoff_time)
+        
+        # Category 2: Volume Distribution
+        snapshot["phase5_buy_sell_volume_imbalance"] = self._compute_buy_sell_volume_imbalance(cutoff_time)
+        snapshot["phase5_volume_concentration"] = self._compute_volume_concentration(cutoff_time)
+        snapshot["phase5_volume_trend"] = self._compute_volume_trend(cutoff_time)
+        
+        # Category 3: Volume-Price Correlation
+        snapshot["phase5_volume_price_divergence"] = self._compute_volume_price_divergence(cutoff_time)
+        snapshot["phase5_volume_confirmation"] = self._compute_volume_confirmation(cutoff_time)
         
         # Store snapshot
         self.snapshot_history.append((current_time, snapshot))
@@ -9172,6 +9190,469 @@ class AdvancedOrderFlow:
         return features
 
 
+    # ===============================================
+    # PHASE 5: ADVANCED VOLUME ANALYTICS
+    # Understanding Volume-Price Relationships
+    # ===============================================
+    
+    def _compute_volume_price_momentum(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 1: Volume-Weighted Price Momentum
+        Tracks price momentum weighted by volume to identify strong moves
+        """
+        features = {}
+        try:
+            recent_trades = [(ts, size, price) for ts, size, price in 
+                           zip(self.trade_timestamps, self.trade_sizes, self.trade_prices) 
+                           if ts >= cutoff_time]
+            
+            if len(recent_trades) >= 10:
+                # Calculate volume-weighted returns
+                total_volume = sum(size for _, size, _ in recent_trades)
+                
+                if total_volume > 0:
+                    # Calculate price changes weighted by volume
+                    vw_returns = []
+                    for i in range(1, len(recent_trades)):
+                        price_change = (recent_trades[i][2] - recent_trades[i-1][2]) / recent_trades[i-1][2]
+                        volume_weight = recent_trades[i][1] / total_volume
+                        vw_returns.append(price_change * volume_weight)
+                    
+                    vw_momentum = sum(vw_returns) * 100  # As percentage
+                    
+                    features['volume_weighted_momentum'] = vw_momentum
+                    features['momentum_strength'] = abs(vw_momentum)
+                    
+                    if abs(vw_momentum) > 0.5:
+                        features['momentum_classification'] = "STRONG"
+                    elif abs(vw_momentum) > 0.2:
+                        features['momentum_classification'] = "MODERATE"
+                    else:
+                        features['momentum_classification'] = "WEAK"
+                    
+                    features['momentum_direction'] = "BULLISH" if vw_momentum > 0 else "BEARISH" if vw_momentum < 0 else "NEUTRAL"
+                else:
+                    features = self._empty_volume_momentum()
+            else:
+                features = self._empty_volume_momentum()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume-price momentum: {e}")
+            features = self._empty_volume_momentum()
+        
+        return features
+    
+    def _empty_volume_momentum(self) -> Dict[str, Any]:
+        return {
+            'volume_weighted_momentum': 0,
+            'momentum_strength': 0,
+            'momentum_classification': "NO_DATA",
+            'momentum_direction': "NEUTRAL"
+        }
+    
+    def _compute_volume_surge(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 1: Volume Surge Detection
+        Identifies abnormal volume spikes that may signal major moves
+        """
+        features = {}
+        try:
+            recent_volume = sum(size for ts, size in zip(self.trade_timestamps, self.trade_sizes) 
+                              if ts >= cutoff_time)
+            
+            # Calculate average volume from longer history
+            all_volume = sum(self.trade_sizes) if self.trade_sizes else 0
+            time_window = time.time() - cutoff_time
+            
+            if time_window > 0 and all_volume > 0:
+                recent_vol_rate = recent_volume / time_window
+                avg_vol_rate = all_volume / (len(self.trade_timestamps) * 0.5) if len(self.trade_timestamps) > 0 else 0
+                
+                if avg_vol_rate > 0:
+                    volume_ratio = recent_vol_rate / avg_vol_rate
+                    
+                    features['volume_surge_ratio'] = volume_ratio
+                    features['recent_volume'] = recent_volume
+                    features['avg_volume_rate'] = avg_vol_rate
+                    
+                    if volume_ratio > 3.0:
+                        features['surge_level'] = "EXTREME"
+                    elif volume_ratio > 2.0:
+                        features['surge_level'] = "HIGH"
+                    elif volume_ratio > 1.5:
+                        features['surge_level'] = "MODERATE"
+                    else:
+                        features['surge_level'] = "NORMAL"
+                else:
+                    features = self._empty_volume_surge()
+            else:
+                features = self._empty_volume_surge()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume surge detection: {e}")
+            features = self._empty_volume_surge()
+        
+        return features
+    
+    def _empty_volume_surge(self) -> Dict[str, Any]:
+        return {
+            'volume_surge_ratio': 1.0,
+            'recent_volume': 0,
+            'avg_volume_rate': 0,
+            'surge_level': "NO_DATA"
+        }
+    
+    def _compute_volume_profile_analysis(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 1: Volume Profile Analysis
+        Identifies price levels with highest trading activity
+        """
+        features = {}
+        try:
+            # Analyze volume distribution across price levels
+            price_volume_map = {}
+            
+            for ts, size, price in zip(self.trade_timestamps, self.trade_sizes, self.trade_prices):
+                if ts >= cutoff_time:
+                    # Round price to nearest 0.1% for grouping
+                    price_level = round(price, -int(math.log10(price * 0.001)))
+                    price_volume_map[price_level] = price_volume_map.get(price_level, 0) + size
+            
+            if price_volume_map:
+                # Find high-volume nodes (POC - Point of Control)
+                sorted_levels = sorted(price_volume_map.items(), key=lambda x: x[1], reverse=True)
+                
+                features['poc_price'] = sorted_levels[0][0]  # Price with most volume
+                features['poc_volume'] = sorted_levels[0][1]
+                features['num_price_levels'] = len(price_volume_map)
+                
+                # Calculate volume concentration (% at top 3 levels)
+                total_vol = sum(price_volume_map.values())
+                top3_vol = sum(vol for _, vol in sorted_levels[:3])
+                features['volume_concentration_pct'] = (top3_vol / total_vol * 100) if total_vol > 0 else 0
+                
+                if features['volume_concentration_pct'] > 50:
+                    features['profile_type'] = "HIGHLY_CONCENTRATED"
+                elif features['volume_concentration_pct'] > 30:
+                    features['profile_type'] = "MODERATELY_CONCENTRATED"
+                else:
+                    features['profile_type'] = "DISTRIBUTED"
+            else:
+                features = self._empty_volume_profile()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume profile analysis: {e}")
+            features = self._empty_volume_profile()
+        
+        return features
+    
+    def _empty_volume_profile(self) -> Dict[str, Any]:
+        return {
+            'poc_price': 0,
+            'poc_volume': 0,
+            'num_price_levels': 0,
+            'volume_concentration_pct': 0,
+            'profile_type': "NO_DATA"
+        }
+    
+    def _compute_buy_sell_volume_imbalance(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 2: Buy vs Sell Volume Imbalance
+        Analyzes directional volume pressure from buyers vs sellers
+        """
+        features = {}
+        try:
+            buy_volume = sum(vol for ts, vol in self.aggressive_buy_vol if ts >= cutoff_time)
+            sell_volume = sum(vol for ts, vol in self.aggressive_sell_vol if ts >= cutoff_time)
+            
+            total_volume = buy_volume + sell_volume
+            
+            if total_volume > 0:
+                features['buy_volume'] = buy_volume
+                features['sell_volume'] = sell_volume
+                features['total_volume'] = total_volume
+                features['buy_volume_pct'] = (buy_volume / total_volume) * 100
+                features['sell_volume_pct'] = (sell_volume / total_volume) * 100
+                features['volume_imbalance'] = (buy_volume - sell_volume) / total_volume
+                
+                if features['volume_imbalance'] > 0.3:
+                    features['imbalance_direction'] = "STRONG_BUY"
+                elif features['volume_imbalance'] > 0.1:
+                    features['imbalance_direction'] = "MODERATE_BUY"
+                elif features['volume_imbalance'] < -0.3:
+                    features['imbalance_direction'] = "STRONG_SELL"
+                elif features['volume_imbalance'] < -0.1:
+                    features['imbalance_direction'] = "MODERATE_SELL"
+                else:
+                    features['imbalance_direction'] = "BALANCED"
+            else:
+                features = self._empty_volume_imbalance()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in buy/sell volume imbalance: {e}")
+            features = self._empty_volume_imbalance()
+        
+        return features
+    
+    def _empty_volume_imbalance(self) -> Dict[str, Any]:
+        return {
+            'buy_volume': 0,
+            'sell_volume': 0,
+            'total_volume': 0,
+            'buy_volume_pct': 50,
+            'sell_volume_pct': 50,
+            'volume_imbalance': 0,
+            'imbalance_direction': "NO_DATA"
+        }
+    
+    def _compute_volume_concentration(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 2: Volume Concentration
+        Analyzes where volume clusters in price ranges
+        """
+        features = {}
+        try:
+            # Get current price
+            current_price = self.trade_prices[-1] if self.trade_prices else 0
+            
+            if current_price > 0:
+                # Define price ranges around current price
+                ranges = {
+                    'very_close': (current_price * 0.999, current_price * 1.001),  # ±0.1%
+                    'close': (current_price * 0.995, current_price * 1.005),  # ±0.5%
+                    'medium': (current_price * 0.99, current_price * 1.01),  # ±1%
+                    'far': (current_price * 0.98, current_price * 1.02)  # ±2%
+                }
+                
+                range_volumes = {key: 0 for key in ranges.keys()}
+                total_volume = 0
+                
+                for ts, size, price in zip(self.trade_timestamps, self.trade_sizes, self.trade_prices):
+                    if ts >= cutoff_time:
+                        total_volume += size
+                        for range_name, (low, high) in ranges.items():
+                            if low <= price <= high:
+                                range_volumes[range_name] += size
+                
+                if total_volume > 0:
+                    features['total_volume'] = total_volume
+                    for range_name, vol in range_volumes.items():
+                        features[f'{range_name}_volume_pct'] = (vol / total_volume) * 100
+                    
+                    # Determine concentration pattern
+                    if features['very_close_volume_pct'] > 60:
+                        features['concentration_pattern'] = "TIGHT_RANGE"
+                    elif features['close_volume_pct'] > 70:
+                        features['concentration_pattern'] = "NORMAL_RANGE"
+                    elif features['far_volume_pct'] > 50:
+                        features['concentration_pattern'] = "WIDE_RANGE"
+                    else:
+                        features['concentration_pattern'] = "DISPERSED"
+                else:
+                    features = self._empty_volume_concentration()
+            else:
+                features = self._empty_volume_concentration()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume concentration: {e}")
+            features = self._empty_volume_concentration()
+        
+        return features
+    
+    def _empty_volume_concentration(self) -> Dict[str, Any]:
+        return {
+            'total_volume': 0,
+            'very_close_volume_pct': 0,
+            'close_volume_pct': 0,
+            'medium_volume_pct': 0,
+            'far_volume_pct': 0,
+            'concentration_pattern': "NO_DATA"
+        }
+    
+    def _compute_volume_trend(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 2: Volume Trend Analysis
+        Detects rising/falling volume patterns over time
+        """
+        features = {}
+        try:
+            # Split recent window into 3 segments
+            recent_trades = [(ts, size) for ts, size in zip(self.trade_timestamps, self.trade_sizes) 
+                           if ts >= cutoff_time]
+            
+            if len(recent_trades) >= 30:
+                segment_size = len(recent_trades) // 3
+                
+                early_vol = sum(size for _, size in recent_trades[:segment_size])
+                mid_vol = sum(size for _, size in recent_trades[segment_size:segment_size*2])
+                late_vol = sum(size for _, size in recent_trades[segment_size*2:])
+                
+                features['early_volume'] = early_vol
+                features['mid_volume'] = mid_vol
+                features['late_volume'] = late_vol
+                
+                # Calculate trend
+                if mid_vol > 0 and early_vol > 0:
+                    trend_slope = ((late_vol / mid_vol) - (mid_vol / early_vol)) / 2
+                    
+                    features['volume_trend_slope'] = trend_slope
+                    
+                    if trend_slope > 0.2:
+                        features['volume_trend'] = "STRONGLY_INCREASING"
+                    elif trend_slope > 0.05:
+                        features['volume_trend'] = "INCREASING"
+                    elif trend_slope < -0.2:
+                        features['volume_trend'] = "STRONGLY_DECREASING"
+                    elif trend_slope < -0.05:
+                        features['volume_trend'] = "DECREASING"
+                    else:
+                        features['volume_trend'] = "STABLE"
+                else:
+                    features = self._empty_volume_trend()
+            else:
+                features = self._empty_volume_trend()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume trend: {e}")
+            features = self._empty_volume_trend()
+        
+        return features
+    
+    def _empty_volume_trend(self) -> Dict[str, Any]:
+        return {
+            'early_volume': 0,
+            'mid_volume': 0,
+            'late_volume': 0,
+            'volume_trend_slope': 0,
+            'volume_trend': "NO_DATA"
+        }
+    
+    def _compute_volume_price_divergence(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 3: Volume-Price Divergence
+        Detects when price and volume move in opposite directions (warning signal)
+        """
+        features = {}
+        try:
+            recent_trades = [(ts, size, price) for ts, size, price in 
+                           zip(self.trade_timestamps, self.trade_sizes, self.trade_prices) 
+                           if ts >= cutoff_time]
+            
+            if len(recent_trades) >= 20:
+                # Split into two halves
+                mid_point = len(recent_trades) // 2
+                
+                first_half = recent_trades[:mid_point]
+                second_half = recent_trades[mid_point:]
+                
+                # Calculate price change
+                first_avg_price = safe_mean([price for _, _, price in first_half])
+                second_avg_price = safe_mean([price for _, _, price in second_half])
+                price_change = (second_avg_price - first_avg_price) / first_avg_price if first_avg_price > 0 else 0
+                
+                # Calculate volume change
+                first_total_vol = sum(size for _, size, _ in first_half)
+                second_total_vol = sum(size for _, size, _ in second_half)
+                volume_change = (second_total_vol - first_total_vol) / first_total_vol if first_total_vol > 0 else 0
+                
+                features['price_change_pct'] = price_change * 100
+                features['volume_change_pct'] = volume_change * 100
+                
+                # Detect divergence
+                price_up = price_change > 0.1
+                price_down = price_change < -0.1
+                volume_up = volume_change > 0.2
+                volume_down = volume_change < -0.2
+                
+                if price_up and volume_down:
+                    features['divergence_type'] = "BEARISH_DIVERGENCE"
+                    features['divergence_strength'] = "STRONG" if volume_change < -0.5 else "MODERATE"
+                elif price_down and volume_up:
+                    features['divergence_type'] = "BULLISH_DIVERGENCE"
+                    features['divergence_strength'] = "STRONG" if volume_change > 0.5 else "MODERATE"
+                else:
+                    features['divergence_type'] = "NO_DIVERGENCE"
+                    features['divergence_strength'] = "NONE"
+            else:
+                features = self._empty_volume_divergence()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume-price divergence: {e}")
+            features = self._empty_volume_divergence()
+        
+        return features
+    
+    def _empty_volume_divergence(self) -> Dict[str, Any]:
+        return {
+            'price_change_pct': 0,
+            'volume_change_pct': 0,
+            'divergence_type': "NO_DATA",
+            'divergence_strength': "NONE"
+        }
+    
+    def _compute_volume_confirmation(self, cutoff_time: float) -> Dict[str, Any]:
+        """
+        Phase 5 Category 3: Volume Confirmation Signals
+        Validates whether volume supports price movements (confirmation = stronger signal)
+        """
+        features = {}
+        try:
+            recent_trades = [(ts, size, price) for ts, size, price in 
+                           zip(self.trade_timestamps, self.trade_sizes, self.trade_prices) 
+                           if ts >= cutoff_time]
+            
+            if len(recent_trades) >= 20:
+                # Get price direction
+                first_prices = [price for _, _, price in recent_trades[:len(recent_trades)//3]]
+                last_prices = [price for _, _, price in recent_trades[-len(recent_trades)//3:]]
+                
+                first_avg = safe_mean(first_prices)
+                last_avg = safe_mean(last_prices)
+                
+                price_change_pct = ((last_avg - first_avg) / first_avg * 100) if first_avg > 0 else 0
+                
+                # Get volume direction
+                first_vol = sum(size for _, size, _ in recent_trades[:len(recent_trades)//2])
+                last_vol = sum(size for _, size, _ in recent_trades[len(recent_trades)//2:])
+                
+                volume_change_pct = ((last_vol - first_vol) / first_vol * 100) if first_vol > 0 else 0
+                
+                features['price_move_direction'] = "UP" if price_change_pct > 0.1 else ("DOWN" if price_change_pct < -0.1 else "FLAT")
+                features['volume_move_direction'] = "UP" if volume_change_pct > 10 else ("DOWN" if volume_change_pct < -10 else "FLAT")
+                features['price_change_magnitude'] = abs(price_change_pct)
+                features['volume_change_magnitude'] = abs(volume_change_pct)
+                
+                # Determine confirmation
+                same_direction = (price_change_pct > 0 and volume_change_pct > 0) or (price_change_pct < 0 and volume_change_pct > 0)
+                
+                if same_direction and abs(volume_change_pct) > 20:
+                    features['confirmation_status'] = "STRONG_CONFIRMATION"
+                    features['signal_quality'] = "HIGH"
+                elif same_direction:
+                    features['confirmation_status'] = "CONFIRMED"
+                    features['signal_quality'] = "MODERATE"
+                else:
+                    features['confirmation_status'] = "NO_CONFIRMATION"
+                    features['signal_quality'] = "LOW"
+            else:
+                features = self._empty_volume_confirmation()
+        
+        except Exception as e:
+            print(f"[Phase5] Error in volume confirmation: {e}")
+            features = self._empty_volume_confirmation()
+        
+        return features
+    
+    def _empty_volume_confirmation(self) -> Dict[str, Any]:
+        return {
+            'price_move_direction': "FLAT",
+            'volume_move_direction': "FLAT",
+            'price_change_magnitude': 0,
+            'volume_change_magnitude': 0,
+            'confirmation_status': "NO_DATA",
+            'signal_quality': "UNKNOWN"
+        }
+
 
 
 
@@ -13050,6 +13531,9 @@ class MarketClient:
         # Display Phase 4 Advanced Intelligence Features
         self._print_phase4_features()
         
+        # Display Phase 5 Advanced Volume Analytics
+        self._print_phase5_volume_features()
+        
         # Display Price Impact Analysis
         self._print_feature_price_impact_analysis()
     
@@ -13216,6 +13700,193 @@ class MarketClient:
         print(f"   📊 STREAM UTILIZATION: 95%+ ACHIEVED!")
         print(f"   💡 16 advanced features + 12 phase 1-3 features = 28 total deep features")
         print(f"   {'='*70}")
+
+
+    def _print_phase5_volume_features(self):
+        """
+        Display Phase 5 Advanced Volume Analytics
+        Shows how volume affects and predicts price movements
+        """
+        print(f"\n  📊 PHASE 5: ADVANCED VOLUME ANALYTICS (VOLUME-PRICE RELATIONSHIPS):")
+        print(f"   {'-'*70}")
+        
+        # Get latest snapshot
+        if not self.advanced_orderflow or not self.advanced_orderflow.snapshot_history:
+            print(f"   ⚪ No data available yet")
+            return
+        
+        _, latest_snapshot = self.advanced_orderflow.snapshot_history[-1]
+        
+        # Category 1: Volume-Price Dynamics
+        print(f"\n   💪 CATEGORY 1: VOLUME-PRICE DYNAMICS")
+        
+        # 1. Volume-Weighted Price Momentum
+        vw_momentum = latest_snapshot.get('phase5_volume_price_momentum', {})
+        if vw_momentum and vw_momentum.get('momentum_classification') != "NO_DATA":
+            direction = vw_momentum.get('momentum_direction', 'UNKNOWN')
+            classification = vw_momentum.get('momentum_classification', 'UNKNOWN')
+            emoji = "🟢" if direction == "BULLISH" else ("🔴" if direction == "BEARISH" else "🟡")
+            
+            print(f"      {emoji} Volume-Weighted Momentum: {direction} ({classification})")
+            print(f"         • Momentum: {vw_momentum.get('volume_weighted_momentum', 0):.3f}%")
+            print(f"         • Strength: {vw_momentum.get('momentum_strength', 0):.3f}%")
+            
+            if classification == "STRONG":
+                print(f"         💡 Strong volume confirms {direction.lower()} move")
+        
+        # 2. Volume Surge Detection
+        vol_surge = latest_snapshot.get('phase5_volume_surge', {})
+        if vol_surge and vol_surge.get('surge_level') != "NO_DATA":
+            surge_level = vol_surge.get('surge_level', 'UNKNOWN')
+            surge_ratio = vol_surge.get('volume_surge_ratio', 1.0)
+            
+            if surge_level == "EXTREME":
+                emoji = "🔥"
+            elif surge_level == "HIGH":
+                emoji = "🟠"
+            elif surge_level == "MODERATE":
+                emoji = "🟡"
+            else:
+                emoji = "🟢"
+            
+            print(f"      {emoji} Volume Surge Level: {surge_level}")
+            print(f"         • Surge Ratio: {surge_ratio:.2f}x average volume")
+            print(f"         • Recent Volume: {vol_surge.get('recent_volume', 0):.4f}")
+            
+            if surge_level in ["EXTREME", "HIGH"]:
+                print(f"         💡 Abnormal volume spike - major move likely")
+        
+        # 3. Volume Profile Analysis
+        vol_profile = latest_snapshot.get('phase5_volume_profile_analysis', {})
+        if vol_profile and vol_profile.get('profile_type') != "NO_DATA":
+            profile_type = vol_profile.get('profile_type', 'UNKNOWN')
+            concentration = vol_profile.get('volume_concentration_pct', 0)
+            
+            print(f"      📍 Volume Profile: {profile_type}")
+            print(f"         • POC Price: ${vol_profile.get('poc_price', 0):,.2f}")
+            print(f"         • POC Volume: {vol_profile.get('poc_volume', 0):.4f}")
+            print(f"         • Concentration: {concentration:.1f}% at top 3 levels")
+            print(f"         • Price Levels: {vol_profile.get('num_price_levels', 0)}")
+        
+        # Category 2: Volume Distribution
+        print(f"\n   📊 CATEGORY 2: VOLUME DISTRIBUTION")
+        
+        # 4. Buy vs Sell Volume Imbalance
+        vol_imbalance = latest_snapshot.get('phase5_buy_sell_volume_imbalance', {})
+        if vol_imbalance and vol_imbalance.get('imbalance_direction') != "NO_DATA":
+            direction = vol_imbalance.get('imbalance_direction', 'UNKNOWN')
+            buy_pct = vol_imbalance.get('buy_volume_pct', 50)
+            sell_pct = vol_imbalance.get('sell_volume_pct', 50)
+            
+            if "BUY" in direction:
+                emoji = "🟢"
+            elif "SELL" in direction:
+                emoji = "🔴"
+            else:
+                emoji = "🟡"
+            
+            print(f"      {emoji} Volume Imbalance: {direction}")
+            print(f"         • Buy Volume: {buy_pct:.1f}%")
+            print(f"         • Sell Volume: {sell_pct:.1f}%")
+            print(f"         • Imbalance: {vol_imbalance.get('volume_imbalance', 0):+.2f}")
+            
+            if "STRONG" in direction:
+                side = "buyers" if "BUY" in direction else "sellers"
+                print(f"         💡 Strong {side} pressure detected")
+        
+        # 5. Volume Concentration
+        vol_concentration = latest_snapshot.get('phase5_volume_concentration', {})
+        if vol_concentration and vol_concentration.get('concentration_pattern') != "NO_DATA":
+            pattern = vol_concentration.get('concentration_pattern', 'UNKNOWN')
+            
+            print(f"      🎯 Volume Concentration: {pattern}")
+            print(f"         • Very Close (±0.1%): {vol_concentration.get('very_close_volume_pct', 0):.1f}%")
+            print(f"         • Close (±0.5%): {vol_concentration.get('close_volume_pct', 0):.1f}%")
+            print(f"         • Medium (±1%): {vol_concentration.get('medium_volume_pct', 0):.1f}%")
+            print(f"         • Far (±2%): {vol_concentration.get('far_volume_pct', 0):.1f}%")
+        
+        # 6. Volume Trend
+        vol_trend = latest_snapshot.get('phase5_volume_trend', {})
+        if vol_trend and vol_trend.get('volume_trend') != "NO_DATA":
+            trend = vol_trend.get('volume_trend', 'UNKNOWN')
+            slope = vol_trend.get('volume_trend_slope', 0)
+            
+            if "INCREASING" in trend:
+                emoji = "📈"
+            elif "DECREASING" in trend:
+                emoji = "📉"
+            else:
+                emoji = "➡️"
+            
+            print(f"      {emoji} Volume Trend: {trend}")
+            print(f"         • Early: {vol_trend.get('early_volume', 0):.4f}")
+            print(f"         • Mid: {vol_trend.get('mid_volume', 0):.4f}")
+            print(f"         • Late: {vol_trend.get('late_volume', 0):.4f}")
+            print(f"         • Trend Slope: {slope:+.2f}")
+        
+        # Category 3: Volume-Price Correlation
+        print(f"\n   🔗 CATEGORY 3: VOLUME-PRICE CORRELATION")
+        
+        # 7. Volume-Price Divergence
+        divergence = latest_snapshot.get('phase5_volume_price_divergence', {})
+        if divergence and divergence.get('divergence_type') != "NO_DATA":
+            div_type = divergence.get('divergence_type', 'UNKNOWN')
+            div_strength = divergence.get('divergence_strength', 'NONE')
+            
+            if "BEARISH" in div_type:
+                emoji = "⚠️"
+                color = "🔴"
+            elif "BULLISH" in div_type:
+                emoji = "💡"
+                color = "🟢"
+            else:
+                emoji = "✅"
+                color = "🟡"
+            
+            print(f"      {emoji} Divergence: {div_type}")
+            print(f"         • Price Change: {divergence.get('price_change_pct', 0):+.2f}%")
+            print(f"         • Volume Change: {divergence.get('volume_change_pct', 0):+.2f}%")
+            
+            if div_strength != "NONE":
+                print(f"         • Strength: {div_strength}")
+                
+                if "BEARISH" in div_type:
+                    print(f"         {color} WARNING: Price up but volume down - reversal risk")
+                elif "BULLISH" in div_type:
+                    print(f"         {color} OPPORTUNITY: Price down but volume up - potential bounce")
+        
+        # 8. Volume Confirmation
+        confirmation = latest_snapshot.get('phase5_volume_confirmation', {})
+        if confirmation and confirmation.get('confirmation_status') != "NO_DATA":
+            status = confirmation.get('confirmation_status', 'UNKNOWN')
+            quality = confirmation.get('signal_quality', 'UNKNOWN')
+            
+            if status == "STRONG_CONFIRMATION":
+                emoji = "✅"
+                color = "🟢"
+            elif status == "CONFIRMED":
+                emoji = "☑️"
+                color = "🟡"
+            else:
+                emoji = "⚠️"
+                color = "🔴"
+            
+            print(f"      {emoji} Volume Confirmation: {status}")
+            print(f"         • Price Direction: {confirmation.get('price_move_direction', 'UNKNOWN')}")
+            print(f"         • Volume Direction: {confirmation.get('volume_move_direction', 'UNKNOWN')}")
+            print(f"         • Signal Quality: {quality}")
+            
+            if status == "STRONG_CONFIRMATION":
+                print(f"         {color} High-confidence signal - volume validates price move")
+            elif status == "NO_CONFIRMATION":
+                print(f"         {color} Low-confidence signal - volume doesn't support price")
+        
+        print(f"\n   {'='*70}")
+        print(f"   📊 PHASE 5 COMPLETE: 8 VOLUME ANALYTICS FEATURES")
+        print(f"   💡 Total Features: 28 (Phases 1-4) + 8 (Phase 5) = 36 deep features")
+        print(f"   {'='*70}")
+
+
 
 
     def _print_feature_price_impact_analysis(self):
