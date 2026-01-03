@@ -3535,9 +3535,10 @@ class AdvancedOrderFlow:
         # PRECISION VALIDATION: Check data quality before processing
         quality_report = self.validate_depth_data_quality(bids_filtered, asks_filtered)
         if quality_report["data_quality_score"] < self.DATA_QUALITY_THRESHOLD:
-            # Log quality warnings for debugging
-            if quality_report["warnings"]:
+            # Log quality warnings for debugging (only if not in initial warmup)
+            if quality_report["warnings"] and len(self.depth_snapshots) > 10:
                 print(f"⚠️  Data quality warning (score: {quality_report['data_quality_score']:.0f}/100): {', '.join(quality_report['warnings'][:2])}")
+                print(f"   💡 Hint: This may resolve after connection stabilizes. Current buffer: {len(self.depth_snapshots)} snapshots")
         
         # Use filtered data for all subsequent calculations
         self.depth_snapshots.append((timestamp, bids_filtered, asks_filtered))
@@ -10747,6 +10748,11 @@ class MarketClient:
 
         # Load history in background
         asyncio.create_task(self._load_historical_data("BTCUSDT"))
+        
+        # ─── Connection State Tracking (for data quality) ────────
+        self.ws_connected_time = None  # Track when WebSocket connects
+        self.first_snapshot_allowed = False  # Don't allow snapshots until warmed up
+        self.min_warmup_seconds = 30  # Minimum warmup time after connection
 
         # ─── Advanced Order Flow Analysis ────────────────────
         if ENABLE_ADVANCED_ORDERFLOW:
@@ -12298,6 +12304,32 @@ class MarketClient:
     def _compute_advanced_snapshot_sync(self, current_time):
         """Synchronous computation of advanced snapshot."""
         try:
+            # ═══════════════════════════════════════════════════════════════
+            # DATA QUALITY CHECK: Ensure minimum data before first snapshot
+            # ═══════════════════════════════════════════════════════════════
+            if self.advanced_orderflow:
+                # Check 1: Connection warmup period (30 seconds after connection)
+                if self.ws_connected_time and not self.first_snapshot_allowed:
+                    elapsed_since_connection = time.time() - self.ws_connected_time
+                    if elapsed_since_connection < self.min_warmup_seconds:
+                        remaining = self.min_warmup_seconds - elapsed_since_connection
+                        print(f"   ⏳ Connection warming up... {remaining:.0f}s remaining before first snapshot")
+                        return
+                    else:
+                        self.first_snapshot_allowed = True
+                
+                # Check 2: Minimum data requirements
+                depth_count = len(self.advanced_orderflow.depth_snapshots)
+                trade_count = len(self.advanced_orderflow.trade_sizes)
+                
+                if depth_count < 10:
+                    print(f"   ⏳ Accumulating data... depth: {depth_count}/10 snapshots, trades: {trade_count}")
+                    return
+                
+                if trade_count < 50:
+                    print(f"   ⏳ Accumulating data... depth: {depth_count}, trades: {trade_count}/50")
+                    return
+            
             # Periodically fetch full depth snapshot via REST (every 30 seconds)
             if self.advanced_orderflow:
                 current_ts = time.time()
@@ -14810,11 +14842,17 @@ class MarketClient:
                     close_timeout=5
                 ) as ws:
                     print(f"[{self.name}] ✅ WS connected")
+                    # Track connection time for data quality warmup
+                    self.ws_connected_time = time.time()
+                    self.first_snapshot_allowed = False  # Reset on reconnection
+                    print(f"[{self.name}] ⏳ Data warmup period started (30s minimum before first snapshot)")
                     async for raw in ws:
                         await self.handle_ws(json.loads(raw))
                     backoff = 1
             except Exception as e:
                 print(f"[{self.name}] ⚠️ WS error: {e}. Reconnecting in {backoff}s…")
+                self.ws_connected_time = None  # Clear on disconnection
+                self.first_snapshot_allowed = False
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 
