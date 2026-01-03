@@ -8238,6 +8238,115 @@ class AdvancedOrderFlow:
             print(f"         • Standard position sizing appropriate")
         
         print(f"\n   {'='*70}")
+    
+    def _calculate_market_stress_indicators(self, snapshot):
+        """
+        Feature 11: Market Stress Indicators - Risk Assessment
+        Calculates composite stress metrics from multiple sources:
+        - Spread widening
+        - Liquidity depletion
+        - Volatility spikes
+        - Volume surges
+        """
+        try:
+            timestamp = snapshot.get('timestamp', time.time())
+            
+            # 1. Spread stress (spread widening relative to normal)
+            current_spread = snapshot.get('bid_ask_spread', 0)
+            avg_spread = safe_mean([s.get('bid_ask_spread', 0) for _, s in list(self.snapshot_history)[-30:]])
+            spread_stress = (current_spread / avg_spread - 1) if avg_spread > 0 else 0
+            spread_stress = max(0, min(spread_stress * 100, 100))  # 0-100 scale
+            
+            # 2. Liquidity stress (top-of-book liquidity depletion)
+            current_depth = snapshot.get('depth_metrics', {}).get('ask_depth_tier1', 0) + \
+                          snapshot.get('depth_metrics', {}).get('bid_depth_tier1', 0)
+            avg_depth = safe_mean([
+                s.get('depth_metrics', {}).get('ask_depth_tier1', 0) + 
+                s.get('depth_metrics', {}).get('bid_depth_tier1', 0) 
+                for _, s in list(self.snapshot_history)[-30:]
+            ])
+            liquidity_stress = (1 - current_depth / avg_depth) * 100 if avg_depth > 0 else 0
+            liquidity_stress = max(0, min(liquidity_stress, 100))
+            
+            # 3. Volatility stress (recent volatility vs average)
+            recent_prices = [s.get('mark_price', 0) for _, s in list(self.snapshot_history)[-10:]]
+            if len(recent_prices) >= 2:
+                recent_returns = [(recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1] 
+                                  for i in range(1, len(recent_prices)) if recent_prices[i-1] > 0]
+                recent_vol = safe_std(recent_returns) * 100 if recent_returns else 0
+                
+                # Compare to longer-term volatility
+                all_prices = [s.get('mark_price', 0) for _, s in list(self.snapshot_history)[-60:]]
+                if len(all_prices) >= 2:
+                    all_returns = [(all_prices[i] - all_prices[i-1]) / all_prices[i-1] 
+                                   for i in range(1, len(all_prices)) if all_prices[i-1] > 0]
+                    avg_vol = safe_std(all_returns) * 100 if all_returns else 0
+                    
+                    volatility_stress = (recent_vol / avg_vol - 1) * 100 if avg_vol > 0 else 0
+                    volatility_stress = max(0, min(volatility_stress, 100))
+                else:
+                    volatility_stress = 0
+            else:
+                volatility_stress = 0
+            
+            # 4. Volume stress (volume surge detection)
+            current_volume = snapshot.get('volume_metrics', {}).get('total_volume', 0)
+            avg_volume = safe_mean([s.get('volume_metrics', {}).get('total_volume', 0) 
+                                    for _, s in list(self.snapshot_history)[-30:]])
+            volume_stress = (current_volume / avg_volume - 1) * 100 if avg_volume > 0 else 0
+            volume_stress = max(0, min(volume_stress, 100))
+            
+            # Composite stress index (weighted average)
+            composite_stress = (
+                spread_stress * 0.30 +
+                liquidity_stress * 0.30 +
+                volatility_stress * 0.25 +
+                volume_stress * 0.15
+            )
+            
+            # Classification
+            if composite_stress > 60:
+                stress_level = "EXTREME"
+                stress_emoji = "🔴"
+            elif composite_stress > 40:
+                stress_level = "HIGH"
+                stress_emoji = "🟠"
+            elif composite_stress > 20:
+                stress_level = "MODERATE"
+                stress_emoji = "🟡"
+            else:
+                stress_level = "LOW"
+                stress_emoji = "🟢"
+            
+            # Store stress indicators as instance variable
+            self.stress_indicators = {
+                'timestamp': timestamp,
+                'composite_stress': composite_stress,
+                'stress_level': stress_level,
+                'stress_emoji': stress_emoji,
+                'spread_stress': spread_stress,
+                'liquidity_stress': liquidity_stress,
+                'volatility_stress': volatility_stress,
+                'volume_stress': volume_stress
+            }
+            
+            # Store in history
+            if not hasattr(self, 'stress_history'):
+                self.stress_history = deque(maxlen=100)
+            self.stress_history.append((timestamp, self.stress_indicators.copy()))
+            
+            # Detect volatility spikes
+            if not hasattr(self, 'volatility_spikes'):
+                self.volatility_spikes = deque(maxlen=20)
+            if volatility_stress > 50:
+                self.volatility_spikes.append({
+                    'timestamp': timestamp,
+                    'stress_level': volatility_stress,
+                    'recent_vol': recent_vol if 'recent_vol' in locals() else 0
+                })
+            
+        except Exception as e:
+            print(f"[AdvancedOrderFlow] ⚠️  Error calculating market stress: {e}")
 
 
 
