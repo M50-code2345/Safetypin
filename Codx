@@ -9149,6 +9149,13 @@ class MarketClient:
         else:
             self.advanced_orderflow = None
             self.feature_extractor = None
+        
+        # ─── Market Mover Detection ──────────────────────────
+        self.market_mover_detector = MarketMoverDetector(
+            detection_window=300,
+            tick_size=0.01
+        )
+        print(f"[{self.name}] ✅ Market Mover Detection enabled")
 
         # ─── Price‐Action Buffers ────────────────────────────
         self.prev_bar       = None  # store previous bar dict
@@ -9465,6 +9472,15 @@ class MarketClient:
                     self.advanced_orderflow.detect_trade_through(
                         p, side, self.last_bid, self.last_ask, ts_t
                     )
+            
+            # Feed to Market Mover Detector
+            if self.market_mover_detector:
+                self.market_mover_detector.update_trade(
+                    timestamp=ts_t,
+                    price=p,
+                    quantity=q,
+                    side=side.lower()
+                )
                 
                 # Correlate with last depth update
                 if self.advanced_orderflow.depth_snapshots:
@@ -9502,6 +9518,10 @@ class MarketClient:
                 # Feed to Advanced Order Flow with price
                 if self.advanced_orderflow:
                     self.advanced_orderflow.process_liquidation(ts_now, side, size, price)
+                
+                # Feed to Market Mover Detector
+                if self.market_mover_detector:
+                    self.market_mover_detector.update_liquidation(ts_now, side, size, price)
 
         # 5) bookTicker (L1 update) - ENHANCED with professional-grade calculations
         elif s.endswith("@bookTicker"):
@@ -9537,6 +9557,13 @@ class MarketClient:
             if self.last_bid_vol > 0 or self.last_ask_vol > 0:
                 quote_pressure = (self.last_bid_vol - self.last_ask_vol) / (self.last_bid_vol + self.last_ask_vol + 1e-10)
                 self.quote_pressure_history.append((ts_m.timestamp(), quote_pressure))
+            
+            # Feed to Market Mover Detector
+            if self.market_mover_detector:
+                spread_bps = (spread / mid) * 10000 if mid > 0 else 0
+                self.market_mover_detector.update_spread(ts_m.timestamp(), spread_bps)
+                total_liquidity = self.last_bid_vol + self.last_ask_vol
+                self.market_mover_detector.update_liquidity(ts_m.timestamp(), total_liquidity)
 
         # 6) markPrice
         elif s.endswith("@markPrice"):
@@ -9713,6 +9740,10 @@ class MarketClient:
             if self.advanced_orderflow:
                 self.advanced_orderflow._print_liquidity_vacuum(snapshot)
             
+            # Print Market Mover Detection (institutional trading activity alerts)
+            if self.market_mover_detector:
+                self._print_market_mover_alerts()
+            
             if PRINT_ALL_FEATURES:
                 # Print ALL features from all remaining feature sets
                 print(f"\n  📊 ALL FEATURES (Non-TIER):")
@@ -9745,6 +9776,141 @@ class MarketClient:
             print(f"[{self.name}] ⚠️ Error computing advanced snapshot: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _print_market_mover_alerts(self):
+        """
+        Print Market Mover Detection alerts.
+        
+        Displays real-time alerts for institutional trading activity:
+        - Large orders (whale trades)
+        - Iceberg orders (hidden liquidity)
+        - Stop loss cascades (rapid liquidations)
+        - Market maker withdrawal (liquidity drops)
+        - Smart money flow (institutional accumulation/distribution)
+        """
+        print(f"\n  🚨 MARKET MOVER DETECTION:")
+        print(f"   {'-'*70}")
+        
+        # Run all detection algorithms
+        alerts = self.market_mover_detector.run_all_detections(cvd=self.cvd)
+        
+        if not alerts:
+            print(f"      ✅ No significant market mover activity detected")
+            print(f"      • Normal trading conditions")
+            print(f"   {'='*70}")
+            return
+        
+        # Group alerts by type
+        alert_groups = {
+            'large_order': [],
+            'iceberg': [],
+            'stop_cascade': [],
+            'maker_withdrawal': [],
+            'smart_money': []
+        }
+        
+        for alert in alerts:
+            if alert.alert_type in alert_groups:
+                alert_groups[alert.alert_type].append(alert)
+        
+        # Display alerts by severity
+        critical_count = sum(1 for a in alerts if a.severity == 'critical')
+        high_count = sum(1 for a in alerts if a.severity == 'high')
+        medium_count = sum(1 for a in alerts if a.severity == 'medium')
+        
+        print(f"\n   📊 ALERT SUMMARY:")
+        if critical_count > 0:
+            print(f"      🔴 CRITICAL: {critical_count} alert(s)")
+        if high_count > 0:
+            print(f"      🟠 HIGH: {high_count} alert(s)")
+        if medium_count > 0:
+            print(f"      🟡 MEDIUM: {medium_count} alert(s)")
+        
+        # Display each alert type
+        if alert_groups['large_order']:
+            print(f"\n   🐋 LARGE ORDER ALERTS:")
+            for alert in alert_groups['large_order']:
+                severity_emoji = {'critical': '🔴', 'high': '🟠', 'medium': '🟡'}.get(alert.severity, '⚪')
+                print(f"      {severity_emoji} {alert.description}")
+                if 'notional' in alert.data:
+                    print(f"         └─ Notional: ${alert.data['notional']:,.0f}")
+                if 'z_score' in alert.data:
+                    print(f"         └─ Z-Score: {alert.data['z_score']:.1f}σ above mean")
+        
+        if alert_groups['iceberg']:
+            print(f"\n   ❄️  ICEBERG ORDER ALERTS:")
+            for alert in alert_groups['iceberg']:
+                severity_emoji = {'critical': '🔴', 'high': '🟠', 'medium': '🟡'}.get(alert.severity, '⚪')
+                print(f"      {severity_emoji} {alert.description}")
+                if 'total_quantity' in alert.data:
+                    print(f"         └─ Total Hidden: {alert.data['total_quantity']:.4f}")
+                if 'num_orders' in alert.data:
+                    print(f"         └─ Order Count: {alert.data['num_orders']}")
+        
+        if alert_groups['stop_cascade']:
+            print(f"\n   ⚡ STOP LOSS CASCADE ALERTS:")
+            for alert in alert_groups['stop_cascade']:
+                severity_emoji = {'critical': '🔴', 'high': '🟠', 'medium': '🟡'}.get(alert.severity, '⚪')
+                print(f"      {severity_emoji} {alert.description}")
+                if 'cascade_type' in alert.data:
+                    print(f"         └─ Cascade Type: {alert.data['cascade_type']}")
+                if 'num_liquidations' in alert.data:
+                    print(f"         └─ Liquidations: {alert.data['num_liquidations']}")
+        
+        if alert_groups['maker_withdrawal']:
+            print(f"\n   📉 MARKET MAKER WITHDRAWAL ALERTS:")
+            for alert in alert_groups['maker_withdrawal']:
+                severity_emoji = {'critical': '🔴', 'high': '🟠', 'medium': '🟡'}.get(alert.severity, '⚪')
+                print(f"      {severity_emoji} {alert.description}")
+                if 'spread_ratio' in alert.data:
+                    print(f"         └─ Spread Increase: {alert.data['spread_ratio']:.1f}x baseline")
+                if 'liquidity_ratio' in alert.data:
+                    liq_drop_pct = (1 - alert.data['liquidity_ratio']) * 100
+                    print(f"         └─ Liquidity Drop: {liq_drop_pct:.0f}%")
+        
+        if alert_groups['smart_money']:
+            print(f"\n   💰 SMART MONEY FLOW ALERTS:")
+            for alert in alert_groups['smart_money']:
+                severity_emoji = {'critical': '🔴', 'high': '🟠', 'medium': '🟡'}.get(alert.severity, '⚪')
+                print(f"      {severity_emoji} {alert.description}")
+                if 'direction' in alert.data:
+                    print(f"         └─ Direction: {alert.data['direction']}")
+                if 'whale_ratio' in alert.data:
+                    print(f"         └─ Whale Volume: {alert.data['whale_ratio']*100:.0f}%")
+                if 'cvd' in alert.data:
+                    print(f"         └─ CVD: {alert.data['cvd']:.2f}")
+        
+        # Trading implications
+        print(f"\n   💡 TRADING IMPLICATIONS:")
+        
+        if critical_count > 0:
+            print(f"      → 🔴 CRITICAL ACTIVITY DETECTED")
+            print(f"         • Extreme caution advised")
+            print(f"         • Reduce position sizes significantly")
+            print(f"         • Monitor for rapid price movements")
+        
+        if alert_groups['stop_cascade']:
+            print(f"      → ⚡ CASCADE RISK ELEVATED")
+            print(f"         • Price may gap through stops")
+            print(f"         • Use wider stop losses")
+        
+        if alert_groups['maker_withdrawal']:
+            print(f"      → 📉 LIQUIDITY DETERIORATING")
+            print(f"         • Increased slippage expected")
+            print(f"         • Use limit orders")
+        
+        if alert_groups['smart_money']:
+            direction = alert_groups['smart_money'][0].data.get('direction', 'Unknown')
+            if direction == 'Accumulation':
+                print(f"      → 💰 INSTITUTIONAL ACCUMULATION")
+                print(f"         • Smart money buying detected")
+                print(f"         • Consider long bias")
+            elif direction == 'Distribution':
+                print(f"      → 💰 INSTITUTIONAL DISTRIBUTION")
+                print(f"         • Smart money selling detected")
+                print(f"         • Consider short bias")
+        
+        print(f"\n   {'='*70}")
 
     def _print_unified_order_book_analysis(self, snapshot):
         """
