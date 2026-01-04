@@ -8407,7 +8407,9 @@ class AdvancedOrderFlow:
             # Get recent spreads
             recent_spreads = []
             for ts, snapshot in list(self.snapshot_history)[-60:]:
-                if ts >= cutoff_time:
+                # Convert datetime to timestamp if needed
+                ts_float = ts.timestamp() if hasattr(ts, 'timestamp') else ts
+                if ts_float >= cutoff_time:
                     spread = snapshot.get('bid_ask_spread', 0)
                     if spread > 0:
                         recent_spreads.append(spread)
@@ -8453,9 +8455,11 @@ class AdvancedOrderFlow:
             # Get recent imbalances
             recent_imbalances = []
             for ts, snapshot in list(self.snapshot_history)[-30:]:
-                if ts >= cutoff_time:
+                # Convert datetime to timestamp if needed
+                ts_float = ts.timestamp() if hasattr(ts, 'timestamp') else ts
+                if ts_float >= cutoff_time:
                     imbalance = snapshot.get('imbalance_metrics', {}).get('imbalance', 0)
-                    recent_imbalances.append((ts, imbalance))
+                    recent_imbalances.append((ts_float, imbalance))
             
             if len(recent_imbalances) >= 3:
                 # Calculate momentum (rate of change)
@@ -8772,7 +8776,9 @@ class AdvancedOrderFlow:
             # Get recent kline data from snapshots
             recent_klines = []
             for ts, snapshot in list(self.snapshot_history)[-20:]:
-                if ts >= cutoff_time:
+                # Convert datetime to timestamp if needed
+                ts_float = ts.timestamp() if hasattr(ts, 'timestamp') else ts
+                if ts_float >= cutoff_time:
                     kline = snapshot.get('kline_data', {})
                     if kline:
                         recent_klines.append(kline)
@@ -8997,7 +9003,9 @@ class AdvancedOrderFlow:
             recent_index_prices = []
             
             for ts, snapshot in list(self.snapshot_history)[-30:]:
-                if ts >= cutoff_time:
+                # Convert datetime to timestamp if needed
+                ts_float = ts.timestamp() if hasattr(ts, 'timestamp') else ts
+                if ts_float >= cutoff_time:
                     mark = snapshot.get('mark_price', 0)
                     index = snapshot.get('index_price', 0)
                     if mark > 0 and index > 0:
@@ -9039,10 +9047,12 @@ class AdvancedOrderFlow:
             # Get recent funding rates
             recent_funding = []
             for ts, snapshot in list(self.snapshot_history)[-60:]:
-                if ts >= cutoff_time:
+                # Convert datetime to timestamp if needed
+                ts_float = ts.timestamp() if hasattr(ts, 'timestamp') else ts
+                if ts_float >= cutoff_time:
                     funding = snapshot.get('funding_rate', 0)
                     if funding != 0:
-                        recent_funding.append((ts, funding))
+                        recent_funding.append((ts_float, funding))
             
             if len(recent_funding) >= 3:
                 # Simple linear regression for prediction
@@ -9157,9 +9167,13 @@ class AdvancedOrderFlow:
         """
         features = {}
         try:
-            # Track large orders from recent trades
-            recent_large_orders = [size for ts, size in zip(self.trade_timestamps, self.trade_sizes) 
-                                  if ts >= cutoff_time and size > safe_mean(self.trade_sizes) * 2]
+            # Track large orders from recent trades - create a list first to avoid mutation during iteration
+            trade_timestamps_list = list(self.trade_timestamps)
+            trade_sizes_list = list(self.trade_sizes)
+            mean_size = safe_mean(trade_sizes_list)
+            
+            recent_large_orders = [size for ts, size in zip(trade_timestamps_list, trade_sizes_list) 
+                                  if ts >= cutoff_time and size > mean_size * 2]
             
             if recent_large_orders:
                 # Calculate absorption metrics
